@@ -888,6 +888,9 @@ main() {
         "security")
             exec "$SCRIPT_DIR/bin/security.sh" "${args[@]:1}"
             ;;
+        "login")
+            exec "$SCRIPT_DIR/bin/login.sh" "${args[@]:1}"
+            ;;
         "purge")
             exec "$SCRIPT_DIR/bin/purge.sh" "${args[@]:1}"
             ;;

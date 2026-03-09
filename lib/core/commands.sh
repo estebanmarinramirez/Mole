@@ -8,6 +8,7 @@ MOLE_COMMANDS=(
     "analyze:Explore disk usage"
     "status:Monitor system health"
     "security:Run security audit"
+    "login:Manage startup items"
     "purge:Remove old project artifacts"
     "installer:Find and remove installer files"
     "touchid:Configure Touch ID for sudo"
