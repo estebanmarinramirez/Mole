@@ -5,7 +5,14 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve symlinks to find the real script location
+_mole_source="${BASH_SOURCE[0]}"
+while [[ -L "$_mole_source" ]]; do
+    _mole_dir="$(cd "$(dirname "$_mole_source")" && pwd)"
+    _mole_source="$(readlink "$_mole_source")"
+    [[ "$_mole_source" != /* ]] && _mole_source="$_mole_dir/$_mole_source"
+done
+SCRIPT_DIR="$(cd "$(dirname "$_mole_source")" && pwd)"
 
 source "$SCRIPT_DIR/lib/core/common.sh"
 source "$SCRIPT_DIR/lib/core/commands.sh"
