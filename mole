@@ -894,6 +894,9 @@ main() {
         "defaults")
             exec "$SCRIPT_DIR/bin/defaults.sh" "${args[@]:1}"
             ;;
+        "privacy")
+            exec "$SCRIPT_DIR/bin/privacy.sh" "${args[@]:1}"
+            ;;
         "purge")
             exec "$SCRIPT_DIR/bin/purge.sh" "${args[@]:1}"
             ;;
