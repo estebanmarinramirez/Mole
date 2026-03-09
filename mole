@@ -891,6 +891,9 @@ main() {
         "login")
             exec "$SCRIPT_DIR/bin/login.sh" "${args[@]:1}"
             ;;
+        "defaults")
+            exec "$SCRIPT_DIR/bin/defaults.sh" "${args[@]:1}"
+            ;;
         "purge")
             exec "$SCRIPT_DIR/bin/purge.sh" "${args[@]:1}"
             ;;

@@ -9,6 +9,7 @@ MOLE_COMMANDS=(
     "status:Monitor system health"
     "security:Run security audit"
     "login:Manage startup items"
+    "defaults:Tune macOS settings"
     "purge:Remove old project artifacts"
     "installer:Find and remove installer files"
     "touchid:Configure Touch ID for sudo"
