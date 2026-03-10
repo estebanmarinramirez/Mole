@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -20,9 +21,9 @@ type model struct {
 	ready      bool
 	collecting bool
 	activeTab  int
-	filter     string   // Connection filter
-	filtering  bool     // Typing a filter
-	sortCol    int      // Sort column for connections
+	filter     string
+	filtering  bool
+	sortCol    int
 }
 
 func newModel(tab int) model {
@@ -74,7 +75,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeTab = (m.activeTab + 4) % 5
 			return m, nil
 		case "/":
-			if m.activeTab == 2 { // Connections tab
+			if m.activeTab == 2 {
 				m.filtering = true
 				m.filter = ""
 			}
@@ -119,36 +120,33 @@ func (m model) View() string {
 
 	var sections []string
 
-	// Header
+	// Header + tabs
 	sections = append(sections, renderHeader(m.snap, w))
 	sections = append(sections, renderTabs(m.activeTab, w))
+	sections = append(sections, lineStyle.Render(strings.Repeat("╌", min(w, 80))))
 
-	// Active tab content
+	// Tab content
 	rxHist, txHist := m.collector.TrafficHistory()
 	sigHist, snrHist := m.collector.SignalHistory()
 
 	var content string
 	switch m.activeTab {
-	case 0:
-		content = renderOverview(m.snap, rxHist, txHist, w)
-	case 1:
-		content = renderTraffic(m.snap, rxHist, txHist, w)
-	case 2:
-		content = renderConnections(m.snap, m.filter, m.sortCol, w)
-	case 3:
-		content = renderDevices(m.snap, w)
-	case 4:
-		content = renderWifi(m.snap, sigHist, snrHist, w)
+	case 0: content = renderOverview(m.snap, rxHist, txHist, w)
+	case 1: content = renderTraffic(m.snap, rxHist, txHist, w)
+	case 2: content = renderConnections(m.snap, m.filter, m.sortCol, w)
+	case 3: content = renderDevices(m.snap, w)
+	case 4: content = renderWifi(m.snap, sigHist, snrHist, w)
 	}
 	sections = append(sections, content)
 
 	// Footer
-	footer := dimStyle.Render("  [1-5] tabs  [Tab] next  [q] quit")
+	footer := subtleStyle.Render("  [1-5] tabs  [Tab] next  [q] quit")
 	if m.filtering {
-		footer = accentStyle.Render("  Filter: " + m.filter + "█")
+		footer = primaryStyle.Render("  Filter: " + m.filter + "_")
 	}
 	sections = append(sections, footer)
 
+	_ = snrHist // Available for future use.
 	return lipgloss.JoinVertical(lipgloss.Left, sections...)
 }
 

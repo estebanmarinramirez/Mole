@@ -8,119 +8,264 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// Match status-go color palette exactly.
 var (
 	titleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#C79FD7")).Bold(true)
-	subtleStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#555555"))
-	accentStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#7EC8E3"))
-	greenStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#95E06C"))
-	yellowStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#F0C674"))
-	redStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#E06C75"))
-	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#666666"))
-	headerStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#B0B0B0")).Bold(true)
-	activeTab    = lipgloss.NewStyle().Foreground(lipgloss.Color("#C79FD7")).Bold(true).Underline(true)
-	inactiveTab  = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
+	subtleStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#737373"))
+	warnStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD75F"))
+	dangerStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5F5F")).Bold(true)
+	okStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#A5D6A7"))
+	lineStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#404040"))
+	primaryStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#BD93F9"))
 
 	tabNames = []string{"Overview", "Traffic", "Connections", "Devices", "WiFi"}
-	tabKeys  = []string{"1", "2", "3", "4", "5"}
 )
 
-// renderTabs renders the tab bar.
+const (
+	iconOverview = "⇅"
+	iconTraffic  = "◈"
+	iconConns    = "◎"
+	iconDevices  = "◧"
+	iconWifi     = "◉"
+)
+
+var tabIcons = []string{iconOverview, iconTraffic, iconConns, iconDevices, iconWifi}
+
+// ==================== Layout Primitives ====================
+
+// cardHeader renders "icon title  ╌╌╌╌╌" matching status-go style.
+func cardHeader(icon, title string, width int) string {
+	titleText := icon + " " + title
+	lineLen := max(width-lipgloss.Width(titleText)-2, 0)
+	header := titleStyle.Render(titleText)
+	if lineLen > 0 {
+		header += "  " + lineStyle.Render(strings.Repeat("╌", lineLen))
+	}
+	return header
+}
+
+// progressBar renders a 16-char bar using █░ (matching status-go).
+func progressBar(percent float64) string {
+	total := 16
+	if percent < 0 { percent = 0 }
+	if percent > 100 { percent = 100 }
+	filled := int(percent / 100 * float64(total))
+	var b strings.Builder
+	for i := range total {
+		if i < filled {
+			b.WriteString("█")
+		} else {
+			b.WriteString("░")
+		}
+	}
+	return colorizePercent(percent, b.String())
+}
+
+func colorizePercent(percent float64, s string) string {
+	switch {
+	case percent >= 85: return dangerStyle.Render(s)
+	case percent >= 60: return warnStyle.Render(s)
+	default:            return okStyle.Render(s)
+	}
+}
+
+func miniBar5(value, maxVal float64) string {
+	if maxVal <= 0 { maxVal = 1 }
+	pct := value / maxVal
+	if pct > 1 { pct = 1 }
+	filled := int(pct * 5)
+	bar := strings.Repeat("▮", filled) + strings.Repeat("▯", 5-filled)
+	if pct > 0.8 { return dangerStyle.Render(bar) }
+	if pct > 0.5 { return warnStyle.Render(bar) }
+	return okStyle.Render(bar)
+}
+
+// sparkline renders a sparkline graph matching status-go style.
+func sparkline(history []float64, width int) string {
+	blocks := []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
+
+	data := make([]float64, 0, width)
+	if len(history) > 0 {
+		start := 0
+		if len(history) > width { start = len(history) - width }
+		data = append(data, history[start:]...)
+	}
+	for len(data) < width {
+		data = append([]float64{0}, data...)
+	}
+	if len(data) > width { data = data[len(data)-width:] }
+
+	maxVal := 0.1
+	for _, v := range data { if v > maxVal { maxVal = v } }
+
+	var current float64
+	if len(data) > 0 { current = data[len(data)-1] }
+
+	var b strings.Builder
+	for _, v := range data {
+		level := max(int((v/maxVal)*float64(len(blocks)-1)), 0)
+		if level >= len(blocks) { level = len(blocks) - 1 }
+		b.WriteRune(blocks[level])
+	}
+
+	result := b.String()
+	if current > 8 { return dangerStyle.Render(result) }
+	if current > 3 { return warnStyle.Render(result) }
+	return okStyle.Render(result)
+}
+
+func sparklineSignal(history []float64, width int) string {
+	blocks := []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
+	data := history
+	if len(data) > width { data = data[len(data)-width:] }
+
+	var b strings.Builder
+	for _, v := range data {
+		// Map RSSI -100..-30 to 0..7
+		norm := (v + 100) / 70.0
+		if norm < 0 { norm = 0 }
+		if norm > 1 { norm = 1 }
+		idx := int(norm * 7)
+		if idx > 7 { idx = 7 }
+		b.WriteRune(blocks[idx])
+	}
+	return okStyle.Render(b.String())
+}
+
+func signalBar(rssi int) string {
+	if rssi == 0 { return subtleStyle.Render("-----") }
+	bars := 0
+	switch {
+	case rssi > -45: bars = 5
+	case rssi > -55: bars = 4
+	case rssi > -65: bars = 3
+	case rssi > -75: bars = 2
+	case rssi > -85: bars = 1
+	}
+	return okStyle.Render(strings.Repeat("▮", bars)) + subtleStyle.Render(strings.Repeat("▯", 5-bars))
+}
+
+func colorSignal(rssi int) string {
+	if rssi == 0 { return "" }
+	label := fmt.Sprintf("%d dBm", rssi)
+	switch {
+	case rssi > -50: return okStyle.Render(label)
+	case rssi > -60: return okStyle.Render(label)
+	case rssi > -70: return warnStyle.Render(label)
+	default:         return dangerStyle.Render(label)
+	}
+}
+
+func formatRate(mb float64) string {
+	if mb < 0.001 { return subtleStyle.Render("0 MB/s") }
+	if mb < 1 { return fmt.Sprintf("%.0f KB/s", mb*1024) }
+	if mb < 10 { return fmt.Sprintf("%.2f MB/s", mb) }
+	return fmt.Sprintf("%.0f MB/s", mb)
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen { return s }
+	return s[:maxLen-1] + "~"
+}
+
+// ==================== Tab Bar ====================
+
 func renderTabs(active int, width int) string {
 	var tabs []string
 	for i, name := range tabNames {
-		label := fmt.Sprintf(" %s %s ", tabKeys[i], name)
+		num := fmt.Sprintf("%d", i+1)
+		label := num + " " + name
 		if i == active {
-			tabs = append(tabs, activeTab.Render(label))
+			tabs = append(tabs, titleStyle.Render(label))
 		} else {
-			tabs = append(tabs, inactiveTab.Render(label))
+			tabs = append(tabs, subtleStyle.Render(label))
 		}
 	}
-	bar := strings.Join(tabs, dimStyle.Render(" | "))
-	return bar + "\n" + dimStyle.Render(strings.Repeat("─", min(width, 80)))
+	bar := "  " + strings.Join(tabs, subtleStyle.Render("  "))
+	return bar
 }
 
-// renderHeader shows the title bar with key metrics.
+// ==================== Header ====================
+
 func renderHeader(snap NetworkSnapshot, width int) string {
-	title := titleStyle.Render("Network Dashboard")
+	title := titleStyle.Render("Mole Network")
+
 	var parts []string
 	if snap.Wifi.Connected {
-		parts = append(parts, fmt.Sprintf("Wi-Fi %s", snap.Wifi.Quality))
+		parts = append(parts, signalBar(snap.Wifi.SignalDBm)+" "+colorSignal(snap.Wifi.SignalDBm))
 	}
-	parts = append(parts, fmt.Sprintf("%d conns", len(snap.Connections)))
-	parts = append(parts, fmt.Sprintf("%d devices", len(snap.LANDevices)))
 	if snap.VPNActive {
-		parts = append(parts, greenStyle.Render("VPN"))
+		parts = append(parts, okStyle.Render("VPN"))
 	}
-	info := dimStyle.Render(strings.Join(parts, " | "))
+	if snap.ExternalIP != "" {
+		parts = append(parts, subtleStyle.Render(snap.ExternalIP))
+	}
 
-	gap := width - lipgloss.Width(title) - lipgloss.Width(info) - 2
+	info := strings.Join(parts, subtleStyle.Render(" · "))
+	gap := width - lipgloss.Width(title) - lipgloss.Width(info) - 4
 	if gap < 1 { gap = 1 }
-	return title + strings.Repeat(" ", gap) + info
+	return "  " + title + strings.Repeat(" ", gap) + info
 }
 
 // ==================== Tab 1: Overview ====================
 
 func renderOverview(snap NetworkSnapshot, rxHist, txHist []float64, width int) string {
+	cw := width - 4
+	if cw < 40 { cw = 40 }
 	var sb strings.Builder
 
-	// Interfaces
-	sb.WriteString(sectionHeader("Interfaces"))
+	// Interfaces card
+	sb.WriteString(cardHeader(iconOverview, "Interfaces", cw) + "\n")
 	for _, iface := range snap.Interfaces {
-		marker := dimStyle.Render("●")
-		if iface.RxRateMBs+iface.TxRateMBs > 0.01 {
-			marker = greenStyle.Render("●")
-		}
-		line := fmt.Sprintf("  %s %-8s %-16s %-18s %s",
-			marker, iface.Name, iface.IP, iface.MAC, dimStyle.Render(iface.Type))
+		dot := subtleStyle.Render("●")
+		if iface.RxRateMBs+iface.TxRateMBs > 0.01 { dot = okStyle.Render("●") }
+		rate := ""
 		if iface.RxRateMBs > 0 || iface.TxRateMBs > 0 {
-			line += dimStyle.Render(fmt.Sprintf("  %.2f/%.2f MB/s", iface.RxRateMBs, iface.TxRateMBs))
+			rate = subtleStyle.Render(fmt.Sprintf("  %s/%s", formatRate(iface.RxRateMBs), formatRate(iface.TxRateMBs)))
 		}
-		sb.WriteString(line + "\n")
+		sb.WriteString(fmt.Sprintf("%s %-8s %-16s %-18s %s%s\n",
+			dot, iface.Name, iface.IP, iface.MAC, subtleStyle.Render(iface.Type), rate))
 	}
 
-	// Wi-Fi
+	// Wi-Fi card
 	if snap.Wifi.Connected {
-		sb.WriteString(sectionHeader("Wi-Fi"))
+		sb.WriteString("\n" + cardHeader(iconWifi, "Wi-Fi", cw) + "\n")
 		ssid := snap.Wifi.SSID
-		if ssid == "" { ssid = "(hidden)" }
-		sb.WriteString(fmt.Sprintf("  SSID       %s\n", ssid))
-		sb.WriteString(fmt.Sprintf("  Signal     %s %s\n", signalBar(snap.Wifi.SignalDBm), colorizeSignal(snap.Wifi.SignalDBm)))
-		sb.WriteString(fmt.Sprintf("  Channel    %s\n", snap.Wifi.Channel))
-		sb.WriteString(fmt.Sprintf("  Security   %s\n", snap.Wifi.Security))
-		sb.WriteString(fmt.Sprintf("  PHY        %s\n", snap.Wifi.PHYMode))
+		if ssid == "" { ssid = subtleStyle.Render("(redacted)") }
+		sb.WriteString(fmt.Sprintf("SSID   %s\n", ssid))
+		sb.WriteString(fmt.Sprintf("Signal %s  %s  %s\n", signalBar(snap.Wifi.SignalDBm), colorSignal(snap.Wifi.SignalDBm), snap.Wifi.Quality))
+		sb.WriteString(fmt.Sprintf("Chan   %s  %s\n", snap.Wifi.Channel, primaryStyle.Render(snap.Wifi.Band)))
+		sb.WriteString(fmt.Sprintf("Mode   %s  %s\n", snap.Wifi.PHYMode, snap.Wifi.Security))
 		if snap.Wifi.TxRate > 0 {
-			sb.WriteString(fmt.Sprintf("  Tx Rate    %d Mbps\n", snap.Wifi.TxRate))
-		}
-		if snap.Wifi.SNR != 0 {
-			sb.WriteString(fmt.Sprintf("  SNR        %d dB\n", snap.Wifi.SNR))
+			sb.WriteString(fmt.Sprintf("Rate   %d Mbps  SNR %d dB\n", snap.Wifi.TxRate, snap.Wifi.SNR))
 		}
 	}
 
-	// Traffic sparklines
-	sb.WriteString(sectionHeader("Traffic"))
-	rxSpark := sparkline(rxHist, 30)
-	txSpark := sparkline(txHist, 30)
-	sb.WriteString(fmt.Sprintf("  Down  %s  %s\n", rxSpark, formatRate(snap.TrafficRx)))
-	sb.WriteString(fmt.Sprintf("  Up    %s  %s\n", txSpark, formatRate(snap.TrafficTx)))
+	// Traffic card
+	graphW := min(cw-22, 16)
+	if graphW < 5 { graphW = 5 }
+	sb.WriteString("\n" + cardHeader(iconTraffic, "Traffic", cw) + "\n")
+	sb.WriteString(fmt.Sprintf("Down   %s  %s\n", sparkline(rxHist, graphW), formatRate(snap.TrafficRx)))
+	sb.WriteString(fmt.Sprintf("Up     %s  %s\n", sparkline(txHist, graphW), formatRate(snap.TrafficTx)))
 
-	// External
-	sb.WriteString(sectionHeader("Connectivity"))
+	// Connectivity card
+	sb.WriteString("\n" + cardHeader("◎", "Connectivity", cw) + "\n")
 	if snap.ExternalIP != "" {
-		sb.WriteString(fmt.Sprintf("  External   %s\n", snap.ExternalIP))
-	} else {
-		sb.WriteString(fmt.Sprintf("  External   %s\n", dimStyle.Render("checking...")))
+		sb.WriteString(fmt.Sprintf("ExtIP  %s\n", snap.ExternalIP))
 	}
 	if snap.VPNActive {
-		sb.WriteString(fmt.Sprintf("  VPN        %s\n", greenStyle.Render("Active")))
+		sb.WriteString(fmt.Sprintf("VPN    %s\n", okStyle.Render("Active")))
 	}
-	dnsLabel := greenStyle.Render("OK")
-	if !snap.DNSOk { dnsLabel = redStyle.Render("FAIL") }
-	sb.WriteString(fmt.Sprintf("  DNS        %s\n", dnsLabel))
+	dnsLabel := okStyle.Render("OK")
+	if !snap.DNSOk { dnsLabel = dangerStyle.Render("FAIL") }
+	sb.WriteString(fmt.Sprintf("DNS    %s\n", dnsLabel))
 	if snap.GatewayIP != "" {
-		sb.WriteString(fmt.Sprintf("  Gateway    %s (%.1fms)\n", snap.GatewayIP, snap.GatewayMs))
+		latency := subtleStyle.Render("unreachable")
+		if snap.GatewayMs > 0 { latency = fmt.Sprintf("%.1fms", snap.GatewayMs) }
+		sb.WriteString(fmt.Sprintf("GW     %s  %s\n", snap.GatewayIP, latency))
 	}
 	if snap.InternetMs > 0 {
-		sb.WriteString(fmt.Sprintf("  Internet   %.1fms\n", snap.InternetMs))
+		sb.WriteString(fmt.Sprintf("Ping   %.1fms\n", snap.InternetMs))
 	}
 
 	return sb.String()
@@ -129,35 +274,34 @@ func renderOverview(snap NetworkSnapshot, rxHist, txHist []float64, width int) s
 // ==================== Tab 2: Traffic ====================
 
 func renderTraffic(snap NetworkSnapshot, rxHist, txHist []float64, width int) string {
+	cw := width - 4
+	if cw < 40 { cw = 40 }
 	var sb strings.Builder
 
-	// Per-interface live rates
-	sb.WriteString(sectionHeader("Interface Rates"))
+	// Per-interface rates
+	sb.WriteString(cardHeader(iconTraffic, "Interface Rates", cw) + "\n")
 	for _, iface := range snap.Interfaces {
-		rx := formatRate(iface.RxRateMBs)
-		tx := formatRate(iface.TxRateMBs)
-		bar := miniBar(iface.RxRateMBs + iface.TxRateMBs, 10.0)
-		sb.WriteString(fmt.Sprintf("  %-8s %s  Rx %s  Tx %s\n", iface.Name, bar, rx, tx))
+		bar := miniBar5(iface.RxRateMBs+iface.TxRateMBs, 10.0)
+		sb.WriteString(fmt.Sprintf("%-8s %s  Rx %-12s Tx %s\n",
+			iface.Name, bar, formatRate(iface.RxRateMBs), formatRate(iface.TxRateMBs)))
 	}
 
-	// Total sparklines (large)
-	sb.WriteString(sectionHeader("Total Bandwidth"))
-	rxSpark := sparkline(rxHist, min(width-25, 60))
-	txSpark := sparkline(txHist, min(width-25, 60))
-	sb.WriteString(fmt.Sprintf("  Down  %s  %s\n", rxSpark, formatRate(snap.TrafficRx)))
-	sb.WriteString(fmt.Sprintf("  Up    %s  %s\n", txSpark, formatRate(snap.TrafficTx)))
+	// Bandwidth sparklines
+	graphW := min(cw-22, 40)
+	if graphW < 5 { graphW = 5 }
+	sb.WriteString("\n" + cardHeader(iconOverview, "Bandwidth", cw) + "\n")
+	sb.WriteString(fmt.Sprintf("Down   %s  %s\n", sparkline(rxHist, graphW), formatRate(snap.TrafficRx)))
+	sb.WriteString(fmt.Sprintf("Up     %s  %s\n", sparkline(txHist, graphW), formatRate(snap.TrafficTx)))
 
 	// Top talkers
-	sb.WriteString(sectionHeader("Top Talkers"))
+	sb.WriteString("\n" + cardHeader("❊", "Top Talkers", cw) + "\n")
 	procs := aggregateProcessTraffic(snap.Connections)
-	sb.WriteString(fmt.Sprintf("  %s\n", dimStyle.Render(fmt.Sprintf("%-18s %5s  %s", "PROCESS", "CONNS", "REMOTE IPs"))))
+	sb.WriteString(subtleStyle.Render(fmt.Sprintf("%-16s %5s  %s", "PROCESS", "CONNS", "REMOTE IPs")) + "\n")
 	for i, p := range procs {
 		if i >= 10 { break }
 		ips := strings.Join(p.IPs, ", ")
-		if len(ips) > 40 {
-			ips = ips[:37] + "..."
-		}
-		sb.WriteString(fmt.Sprintf("  %-18s %5d  %s\n", truncate(p.Name, 18), p.Conns, ips))
+		if len(ips) > 38 { ips = ips[:35] + "..." }
+		sb.WriteString(fmt.Sprintf("%-16s %5d  %s\n", truncate(p.Name, 16), p.Conns, subtleStyle.Render(ips)))
 	}
 
 	return sb.String()
@@ -166,6 +310,8 @@ func renderTraffic(snap NetworkSnapshot, rxHist, txHist []float64, width int) st
 // ==================== Tab 3: Connections ====================
 
 func renderConnections(snap NetworkSnapshot, filter string, sortCol int, width int) string {
+	cw := width - 4
+	if cw < 40 { cw = 40 }
 	var sb strings.Builder
 
 	filtered := snap.Connections
@@ -181,40 +327,38 @@ func renderConnections(snap NetworkSnapshot, filter string, sortCol int, width i
 		filtered = f
 	}
 
-	sb.WriteString(sectionHeader(fmt.Sprintf("TCP Connections (%d)", len(filtered))))
+	sb.WriteString(cardHeader(iconConns, fmt.Sprintf("TCP Connections (%d)", len(filtered)), cw) + "\n")
 	if filter != "" {
-		sb.WriteString(fmt.Sprintf("  Filter: %s\n", accentStyle.Render(filter)))
+		sb.WriteString(primaryStyle.Render("Filter: "+filter) + "\n")
 	}
-	sb.WriteString(dimStyle.Render("  [/] filter  [s] sort  [esc] clear"))
-	sb.WriteString("\n\n")
+	sb.WriteString(subtleStyle.Render("[/] filter  [s] sort  [esc] clear") + "\n\n")
 
-	// Header
-	sb.WriteString(fmt.Sprintf("  %s\n",
-		dimStyle.Render(fmt.Sprintf("%-14s %5s %-22s %5s  %s", "PROCESS", "PID", "REMOTE", "PORT", "HOSTNAME"))))
-	sb.WriteString(dimStyle.Render("  " + strings.Repeat("─", min(width-4, 76))))
-	sb.WriteString("\n")
+	sb.WriteString(subtleStyle.Render(fmt.Sprintf("%-14s %5s %-22s %5s  %s",
+		"PROCESS", "PID", "REMOTE", "PORT", "HOSTNAME")) + "\n")
 
-	maxShow := 25
+	maxShow := 22
 	for i, c := range filtered {
 		if i >= maxShow { break }
 		host := c.Hostname
-		if host == "" { host = dimStyle.Render("-") }
-		if len(host) > 24 { host = host[:21] + "..." }
-		sb.WriteString(fmt.Sprintf("  %-14s %5d %-22s %5d  %s\n",
+		if host == "" { host = subtleStyle.Render("-") }
+		if len(host) > 22 { host = host[:19] + "..." }
+		sb.WriteString(fmt.Sprintf("%-14s %5d %-22s %5d  %s\n",
 			truncate(c.Process, 14), c.PID, c.RemoteIP, c.RemotePort, host))
 	}
 
 	if len(filtered) > maxShow {
-		sb.WriteString(dimStyle.Render(fmt.Sprintf("  ... and %d more\n", len(filtered)-maxShow)))
+		sb.WriteString(subtleStyle.Render(fmt.Sprintf("... and %d more", len(filtered)-maxShow)) + "\n")
 	}
 
 	// Listeners
-	sb.WriteString("\n")
-	sb.WriteString(sectionHeader(fmt.Sprintf("Listening Ports (%d)", len(snap.Listeners))))
-	sb.WriteString(fmt.Sprintf("  %s\n", dimStyle.Render(fmt.Sprintf("%-14s %6s  %s", "PROCESS", "PORT", "ADDRESS"))))
+	sb.WriteString("\n" + cardHeader("◪", fmt.Sprintf("Listening Ports (%d)", len(snap.Listeners)), cw) + "\n")
+	sb.WriteString(subtleStyle.Render(fmt.Sprintf("%-14s %6s  %s", "PROCESS", "PORT", "ADDRESS")) + "\n")
 	for i, l := range snap.Listeners {
-		if i >= 15 { break }
-		sb.WriteString(fmt.Sprintf("  %-14s %6d  %s\n", truncate(l.Process, 14), l.Port, l.Addr))
+		if i >= 12 { break }
+		portStyle := subtleStyle
+		if l.Port < 1024 { portStyle = warnStyle }
+		sb.WriteString(fmt.Sprintf("%-14s %s  %s\n",
+			truncate(l.Process, 14), portStyle.Render(fmt.Sprintf("%6d", l.Port)), l.Addr))
 	}
 
 	return sb.String()
@@ -223,32 +367,32 @@ func renderConnections(snap NetworkSnapshot, filter string, sortCol int, width i
 // ==================== Tab 4: Devices ====================
 
 func renderDevices(snap NetworkSnapshot, width int) string {
+	cw := width - 4
+	if cw < 40 { cw = 40 }
 	var sb strings.Builder
 
-	sb.WriteString(sectionHeader(fmt.Sprintf("LAN Devices (%d)", len(snap.LANDevices))))
-	sb.WriteString(fmt.Sprintf("  %s\n",
-		dimStyle.Render(fmt.Sprintf("%-16s %-18s %-14s %s", "IP", "MAC", "VENDOR", "HOST"))))
-	sb.WriteString(dimStyle.Render("  " + strings.Repeat("─", min(width-4, 76))))
-	sb.WriteString("\n")
+	sb.WriteString(cardHeader(iconDevices, fmt.Sprintf("LAN Devices (%d)", len(snap.LANDevices)), cw) + "\n")
+	sb.WriteString(subtleStyle.Render(fmt.Sprintf("%-16s %-18s %-12s %s",
+		"IP", "MAC", "VENDOR", "HOST")) + "\n")
 
 	for _, d := range snap.LANDevices {
 		vendor := d.Vendor
-		if vendor == "" { vendor = dimStyle.Render("-") }
+		if vendor == "" { vendor = subtleStyle.Render("-") }
 		host := d.Hostname
-		if host == "" { host = dimStyle.Render("-") }
-		if len(host) > 22 { host = host[:19] + "..." }
+		if host == "" { host = subtleStyle.Render("-") }
+		if len(host) > 24 { host = host[:21] + "..." }
 
 		badges := ""
-		if d.IsGateway { badges += yellowStyle.Render(" [GW]") }
-		if d.IsSelf { badges += accentStyle.Render(" [ME]") }
-		if d.IsHidden { badges += redStyle.Render(" [HIDDEN]") }
+		if d.IsGateway { badges += warnStyle.Render(" GW") }
+		if d.IsSelf    { badges += primaryStyle.Render(" ME") }
+		if d.IsHidden  { badges += dangerStyle.Render(" HIDDEN") }
 
-		sb.WriteString(fmt.Sprintf("  %-16s %-18s %-14s %s%s\n",
-			d.IP, d.MAC, truncate(vendor, 14), host, badges))
+		sb.WriteString(fmt.Sprintf("%-16s %-18s %-12s %s%s\n",
+			d.IP, d.MAC, truncate(vendor, 12), host, badges))
 	}
 
 	if len(snap.LANDevices) == 0 {
-		sb.WriteString(dimStyle.Render("  Scanning...") + "\n")
+		sb.WriteString(subtleStyle.Render("Scanning...") + "\n")
 	}
 
 	return sb.String()
@@ -257,169 +401,74 @@ func renderDevices(snap NetworkSnapshot, width int) string {
 // ==================== Tab 5: WiFi Analysis ====================
 
 func renderWifi(snap NetworkSnapshot, sigHist, snrHist []float64, width int) string {
+	cw := width - 4
+	if cw < 40 { cw = 40 }
 	var sb strings.Builder
 
 	if !snap.Wifi.Connected {
-		sb.WriteString(sectionHeader("Wi-Fi"))
-		sb.WriteString(dimStyle.Render("  Not connected to a Wi-Fi network") + "\n")
+		sb.WriteString(cardHeader(iconWifi, "Wi-Fi", cw) + "\n")
+		sb.WriteString(subtleStyle.Render("Not connected") + "\n")
 		return sb.String()
 	}
 
 	// Current connection
-	sb.WriteString(sectionHeader("Current Connection"))
+	sb.WriteString(cardHeader(iconWifi, "Connection", cw) + "\n")
 	ssid := snap.Wifi.SSID
-	if ssid == "" { ssid = "(hidden SSID)" }
-	sb.WriteString(fmt.Sprintf("  Network    %s\n", accentStyle.Render(ssid)))
-	sb.WriteString(fmt.Sprintf("  Signal     %s %s\n", signalBar(snap.Wifi.SignalDBm), colorizeSignal(snap.Wifi.SignalDBm)))
-	sb.WriteString(fmt.Sprintf("  Channel    %s\n", snap.Wifi.Channel))
-	sb.WriteString(fmt.Sprintf("  Band       %s\n", snap.Wifi.Band))
-	sb.WriteString(fmt.Sprintf("  Security   %s\n", snap.Wifi.Security))
-	sb.WriteString(fmt.Sprintf("  PHY Mode   %s\n", snap.Wifi.PHYMode))
+	if ssid == "" { ssid = subtleStyle.Render("(redacted)") }
+	sb.WriteString(fmt.Sprintf("Net    %s\n", primaryStyle.Render(ssid)))
+	sb.WriteString(fmt.Sprintf("Signal %s  %s\n", signalBar(snap.Wifi.SignalDBm), colorSignal(snap.Wifi.SignalDBm)))
+	sb.WriteString(fmt.Sprintf("Chan   %s\n", snap.Wifi.Channel))
+	sb.WriteString(fmt.Sprintf("Band   %s  Mode %s\n", primaryStyle.Render(snap.Wifi.Band), snap.Wifi.PHYMode))
+	sb.WriteString(fmt.Sprintf("Sec    %s\n", snap.Wifi.Security))
 	if snap.Wifi.TxRate > 0 {
-		sb.WriteString(fmt.Sprintf("  Tx Rate    %d Mbps\n", snap.Wifi.TxRate))
+		sb.WriteString(fmt.Sprintf("Rate   %d Mbps\n", snap.Wifi.TxRate))
 	}
 	if snap.Wifi.SNR != 0 {
-		sb.WriteString(fmt.Sprintf("  SNR        %d dB (%s)\n", snap.Wifi.SNR, snrLabel(snap.Wifi.SNR)))
+		snrLabel := "Poor"
+		switch {
+		case snap.Wifi.SNR > 40: snrLabel = "Excellent"
+		case snap.Wifi.SNR > 25: snrLabel = "Good"
+		case snap.Wifi.SNR > 15: snrLabel = "Fair"
+		}
+		sb.WriteString(fmt.Sprintf("SNR    %d dB (%s)\n", snap.Wifi.SNR, snrLabel))
 	}
 
 	// Signal history
 	if len(sigHist) > 0 {
-		sb.WriteString(sectionHeader("Signal History"))
-		sigSpark := sparklineInverted(sigHist, min(width-20, 50))
-		sb.WriteString(fmt.Sprintf("  RSSI   %s  %d dBm\n", sigSpark, snap.Wifi.SignalDBm))
+		graphW := min(cw-15, 40)
+		if graphW < 5 { graphW = 5 }
+		sb.WriteString("\n" + cardHeader("◈", "Signal History", cw) + "\n")
+		sb.WriteString(fmt.Sprintf("RSSI   %s  %s\n", sparklineSignal(sigHist, graphW), colorSignal(snap.Wifi.SignalDBm)))
 	}
 
-	// Channel utilization map
-	sb.WriteString(sectionHeader("Channel Map"))
-	chMap := buildChannelMap(snap.Wifi, snap.NearbyNets)
-	for _, line := range chMap {
-		sb.WriteString("  " + line + "\n")
+	// Channel map
+	sb.WriteString("\n" + cardHeader("◎", "Channel Map", cw) + "\n")
+	chLines := buildChannelMap(snap.Wifi, snap.NearbyNets)
+	for _, line := range chLines {
+		sb.WriteString(line + "\n")
 	}
 
 	// Nearby networks
 	if len(snap.NearbyNets) > 0 {
-		sb.WriteString(sectionHeader(fmt.Sprintf("Nearby Networks (%d)", len(snap.NearbyNets))))
-		sb.WriteString(fmt.Sprintf("  %s\n",
-			dimStyle.Render(fmt.Sprintf("%-20s %-12s %-10s %s", "SSID", "CHANNEL", "SECURITY", "SIGNAL"))))
+		sb.WriteString("\n" + cardHeader("◧", fmt.Sprintf("Nearby (%d)", len(snap.NearbyNets)), cw) + "\n")
+		sb.WriteString(subtleStyle.Render(fmt.Sprintf("%-18s %-14s %-12s %s",
+			"SSID", "CHANNEL", "SECURITY", "SIGNAL")) + "\n")
 		for i, n := range snap.NearbyNets {
-			if i >= 15 { break }
-			sig := colorizeSignal(n.SignalDBm)
+			if i >= 12 { break }
 			name := n.SSID
-			if name == "<redacted>" { name = dimStyle.Render("(hidden)") }
-			sb.WriteString(fmt.Sprintf("  %-20s %-12s %-10s %s\n",
-				truncate(name, 20), n.Channel, truncate(n.Security, 10), sig))
+			if name == "<redacted>" { name = subtleStyle.Render("(hidden)") }
+			sb.WriteString(fmt.Sprintf("%-18s %-14s %-12s %s\n",
+				truncate(name, 18), n.Channel, truncate(n.Security, 12), colorSignal(n.SignalDBm)))
 		}
 	}
 
 	return sb.String()
 }
 
-// ==================== Helpers ====================
-
-func sectionHeader(title string) string {
-	return "\n" + headerStyle.Render("  "+title) + "\n\n"
-}
-
-func signalBar(rssi int) string {
-	if rssi == 0 { return dimStyle.Render("-----") }
-	bars := 0
-	switch {
-	case rssi > -45: bars = 5
-	case rssi > -55: bars = 4
-	case rssi > -65: bars = 3
-	case rssi > -75: bars = 2
-	case rssi > -85: bars = 1
-	}
-	filled := strings.Repeat("▮", bars)
-	empty := strings.Repeat("▯", 5-bars)
-	return filled + empty
-}
-
-func colorizeSignal(rssi int) string {
-	if rssi == 0 { return "" }
-	label := fmt.Sprintf("%d dBm", rssi)
-	switch {
-	case rssi > -50: return greenStyle.Render(label + " Excellent")
-	case rssi > -60: return greenStyle.Render(label + " Good")
-	case rssi > -70: return yellowStyle.Render(label + " Fair")
-	default:         return redStyle.Render(label + " Weak")
-	}
-}
-
-func snrLabel(snr int) string {
-	switch {
-	case snr > 40: return "Excellent"
-	case snr > 25: return "Good"
-	case snr > 15: return "Fair"
-	default:       return "Poor"
-	}
-}
-
-func sparkline(history []float64, width int) string {
-	if len(history) == 0 { return strings.Repeat("▁", width) }
-	chars := []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
-	maxVal := 0.001
-	for _, v := range history { if v > maxVal { maxVal = v } }
-
-	// Take last `width` values.
-	data := history
-	if len(data) > width { data = data[len(data)-width:] }
-
-	var sb strings.Builder
-	for _, v := range data {
-		idx := int(v / maxVal * 7)
-		if idx > 7 { idx = 7 }
-		if idx < 0 { idx = 0 }
-		sb.WriteRune(chars[idx])
-	}
-	// Pad if needed.
-	for sb.Len() < width { sb.WriteRune(chars[0]) }
-	return accentStyle.Render(sb.String())
-}
-
-func sparklineInverted(history []float64, width int) string {
-	// For RSSI: values are negative, closer to 0 is better.
-	if len(history) == 0 { return strings.Repeat("▁", width) }
-	chars := []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
-
-	data := history
-	if len(data) > width { data = data[len(data)-width:] }
-
-	// Map -100..-30 to 0..7
-	var sb strings.Builder
-	for _, v := range data {
-		normalized := (v + 100) / 70.0 // -100->0, -30->1
-		if normalized < 0 { normalized = 0 }
-		if normalized > 1 { normalized = 1 }
-		idx := int(normalized * 7)
-		if idx > 7 { idx = 7 }
-		sb.WriteRune(chars[idx])
-	}
-	return accentStyle.Render(sb.String())
-}
-
-func miniBar(value, maxVal float64) string {
-	if maxVal <= 0 { maxVal = 1 }
-	pct := value / maxVal
-	if pct > 1 { pct = 1 }
-	filled := int(pct * 10)
-	return accentStyle.Render(strings.Repeat("▮", filled) + strings.Repeat("▯", 10-filled))
-}
-
-func formatRate(mb float64) string {
-	if mb < 0.001 { return dimStyle.Render("0 B/s") }
-	if mb < 1 { return fmt.Sprintf("%.0f KB/s", mb*1024) }
-	return fmt.Sprintf("%.2f MB/s", mb)
-}
-
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen { return s }
-	return s[:maxLen-1] + "~"
-}
+// ==================== Channel Map ====================
 
 func buildChannelMap(current WifiInfo, nearby []NearbyNetwork) []string {
-	// Show 2.4GHz and 5GHz channel utilization.
-	ch24 := make(map[int]int) // channel -> count
+	ch24 := make(map[int]int)
 	ch5  := make(map[int]int)
 
 	addCh := func(ch string) {
@@ -436,39 +485,36 @@ func buildChannelMap(current WifiInfo, nearby []NearbyNetwork) []string {
 	var lines []string
 
 	if len(ch24) > 0 {
-		line24 := "2.4GHz: "
+		line := subtleStyle.Render("2.4G ") + " "
 		for ch := 1; ch <= 13; ch++ {
 			cnt := ch24[ch]
 			label := fmt.Sprintf("%2d", ch)
-			if cnt == 0 {
-				line24 += dimStyle.Render(label) + " "
-			} else if cnt == 1 {
-				line24 += greenStyle.Render(label) + " "
-			} else {
-				line24 += redStyle.Render(label) + " "
+			switch {
+			case cnt == 0: line += subtleStyle.Render(label) + " "
+			case cnt == 1: line += okStyle.Render(label) + " "
+			default:       line += dangerStyle.Render(label) + " "
 			}
 		}
-		lines = append(lines, line24)
+		lines = append(lines, line)
 	}
 
 	if len(ch5) > 0 {
-		line5 := "5GHz:   "
-		for _, ch := range []int{36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 149, 153, 157, 161, 165} {
+		line := subtleStyle.Render("5GHz ") + " "
+		channels5 := []int{36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 149, 153, 157, 161, 165}
+		for _, ch := range channels5 {
 			cnt := ch5[ch]
 			label := fmt.Sprintf("%3d", ch)
-			if cnt == 0 {
-				line5 += dimStyle.Render(label) + " "
-			} else if cnt == 1 {
-				line5 += greenStyle.Render(label) + " "
-			} else {
-				line5 += yellowStyle.Render(label) + " "
+			switch {
+			case cnt == 0: line += subtleStyle.Render(label) + " "
+			case cnt == 1: line += okStyle.Render(label) + " "
+			default:       line += warnStyle.Render(label) + " "
 			}
 		}
-		lines = append(lines, line5)
+		lines = append(lines, line)
 	}
 
 	if len(lines) == 0 {
-		lines = append(lines, dimStyle.Render("No channel data available"))
+		lines = append(lines, subtleStyle.Render("No channel data"))
 	}
 	return lines
 }
