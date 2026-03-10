@@ -4,6 +4,7 @@ set -euo pipefail
 
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/purge_shared.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/active_project.sh"
 # Preflight TCC prompts once to avoid mid-run interruptions.
 check_tcc_permissions() {
     [[ -t 1 ]] || return 0
@@ -49,7 +50,38 @@ clean_service_worker_cache() {
     [[ ! -d "$cache_path" ]] && return 0
     local cleaned_size=0
     local protected_count=0
+    # Cache of active project roots (bash 3.2 compatible, no associative arrays).
+    local _active_roots=""
+    local _inactive_roots=""
+    local skipped_count=0
+
     while IFS= read -r cache_dir; do
+        # Resolve project root for this cache directory.
+        local proj_root
+        proj_root=$(get_project_root "$cache_dir")
+
+        # Check active status with string-based caching.
+        local _is_active="unknown"
+        if echo "$_active_roots" | grep -qF "|${proj_root}|" 2>/dev/null; then
+            _is_active="yes"
+        elif echo "$_inactive_roots" | grep -qF "|${proj_root}|" 2>/dev/null; then
+            _is_active="no"
+        else
+            if is_active_project "$proj_root"; then
+                _active_roots="${_active_roots}|${proj_root}|"
+                _is_active="yes"
+            else
+                _inactive_roots="${_inactive_roots}|${proj_root}|"
+                _is_active="no"
+            fi
+        fi
+
+        if [[ "$_is_active" == "yes" ]]; then
+            skipped_count=$((skipped_count + 1))
+            debug_log "Skipping cache in active project: $cache_dir"
+            continue
+        fi
+
         [[ ! -d "$cache_dir" ]] && continue
         # Extract a best-effort domain name from cache folder.
         local domain=$(basename "$cache_dir" | grep -oE '[a-zA-Z0-9][-a-zA-Z0-9]*\.[a-zA-Z]{2,}' | head -1 || echo "")
@@ -69,6 +101,10 @@ clean_service_worker_cache() {
             cleaned_size=$((cleaned_size + size))
         fi
     done < <(run_with_timeout 10 sh -c "find '$cache_path' -type d -depth 2 2> /dev/null || true")
+
+    if [[ $skipped_count -gt 0 ]]; then
+        echo -e "  ${BLUE}${ICON_REVIEW}${NC} Skipped ${skipped_count} cache(s) in active projects"
+    fi
     if [[ $cleaned_size -gt 0 ]]; then
         local spinner_was_running=false
         if [[ -t 1 && -n "${INLINE_SPINNER_PID:-}" ]]; then
@@ -179,6 +215,7 @@ scan_project_cache_root() {
 }
 
 # Next.js/Python/Flutter project caches scoped to discovered project roots.
+# Skips caches belonging to active projects (open files, recent edits, dirty git).
 clean_project_caches() {
     stop_inline_spinner 2> /dev/null || true
 
@@ -206,7 +243,38 @@ clean_project_caches() {
         stop_inline_spinner
     fi
 
+    # Cache of active project roots (bash 3.2 compatible, no associative arrays).
+    local _active_roots=""
+    local _inactive_roots=""
+    local skipped_count=0
+
     while IFS= read -r cache_dir; do
+        # Resolve project root for this cache directory.
+        local proj_root
+        proj_root=$(get_project_root "$cache_dir")
+
+        # Check active status with string-based caching.
+        local _is_active="unknown"
+        if echo "$_active_roots" | grep -qF "|${proj_root}|" 2>/dev/null; then
+            _is_active="yes"
+        elif echo "$_inactive_roots" | grep -qF "|${proj_root}|" 2>/dev/null; then
+            _is_active="no"
+        else
+            if is_active_project "$proj_root"; then
+                _active_roots="${_active_roots}|${proj_root}|"
+                _is_active="yes"
+            else
+                _inactive_roots="${_inactive_roots}|${proj_root}|"
+                _is_active="no"
+            fi
+        fi
+
+        if [[ "$_is_active" == "yes" ]]; then
+            skipped_count=$((skipped_count + 1))
+            debug_log "Skipping cache in active project: $cache_dir"
+            continue
+        fi
+
         case "$(basename "$cache_dir")" in
             ".next")
                 [[ -d "$cache_dir/cache" ]] && safe_clean "$cache_dir/cache"/* "Next.js build cache" || true
@@ -225,4 +293,8 @@ clean_project_caches() {
                 ;;
         esac
     done < <(LC_ALL=C sort -u "$matches_tmp_file" 2> /dev/null)
+
+    if [[ $skipped_count -gt 0 ]]; then
+        echo -e "  ${BLUE}${ICON_REVIEW}${NC} Skipped ${skipped_count} cache(s) in active projects"
+    fi
 }
