@@ -74,6 +74,7 @@ type MetricsSnapshot struct {
 	Network        []NetworkStatus   `json:"network"`
 	NetworkHistory NetworkHistory    `json:"network_history"`
 	Proxy          ProxyStatus       `json:"proxy"`
+	Wifi           WifiStatus        `json:"wifi"`
 	Batteries      []BatteryStatus   `json:"batteries"`
 	Thermal        ThermalStatus     `json:"thermal"`
 	Sensors        []SensorReading   `json:"sensors"`
@@ -150,6 +151,19 @@ type NetworkStatus struct {
 	IP        string  `json:"ip"`
 }
 
+// WifiStatus holds Wi-Fi connection details.
+type WifiStatus struct {
+	Connected    bool   `json:"connected"`
+	SSID         string `json:"ssid"`
+	Channel      string `json:"channel"`
+	Security     string `json:"security"`
+	PHYMode      string `json:"phy_mode"`
+	SignalDBm    int    `json:"signal_dbm"`    // RSSI in dBm (negative)
+	NoiseDBm     int    `json:"noise_dbm"`     // Noise floor in dBm (negative)
+	SignalLabel  string `json:"signal_label"`  // Excellent/Good/Fair/Weak
+	LANDevices   int    `json:"lan_devices"`   // Count from ARP cache
+}
+
 // NetworkHistory holds the global network usage history.
 type NetworkHistory struct {
 	RxHistory []float64 `json:"rx_history"`
@@ -215,6 +229,10 @@ type Collector struct {
 	cachedGPU    []GPUStatus
 	prevDiskIO   disk.IOCountersStat
 	lastDiskAt   time.Time
+
+	// Wifi cache (10s TTL - system_profiler is slow).
+	lastWifiAt time.Time
+	cachedWifi WifiStatus
 }
 
 func NewCollector() *Collector {
@@ -245,6 +263,7 @@ func (c *Collector) Collect() (MetricsSnapshot, error) {
 		diskIO       DiskIOStatus
 		netStats     []NetworkStatus
 		proxyStats   ProxyStatus
+		wifiStats    WifiStatus
 		batteryStats []BatteryStatus
 		thermalStats ThermalStatus
 		sensorStats  []SensorReading
@@ -289,6 +308,17 @@ func (c *Collector) Collect() (MetricsSnapshot, error) {
 	collect(func() (err error) { diskIO = c.collectDiskIO(now); return nil })
 	collect(func() (err error) { netStats, err = c.collectNetwork(now); return })
 	collect(func() (err error) { proxyStats = collectProxy(); return nil })
+	collect(func() (err error) {
+		// Wi-Fi is slow (system_profiler takes ~8s); cache for 10s.
+		if now.Sub(c.lastWifiAt) > 10*time.Second {
+			wifiStats = collectWifi()
+			c.cachedWifi = wifiStats
+			c.lastWifiAt = now
+		} else {
+			wifiStats = c.cachedWifi
+		}
+		return nil
+	})
 	collect(func() (err error) { batteryStats, _ = collectBatteries(); return nil })
 	collect(func() (err error) { thermalStats = collectThermal(); return nil })
 	// Sensors disabled - CPU temp already shown in CPU card
@@ -341,6 +371,7 @@ func (c *Collector) Collect() (MetricsSnapshot, error) {
 			TxHistory: c.txHistoryBuf.Slice(),
 		},
 		Proxy:        proxyStats,
+		Wifi:         wifiStats,
 		Batteries:    batteryStats,
 		Thermal:      thermalStats,
 		Sensors:      sensorStats,

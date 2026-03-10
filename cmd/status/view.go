@@ -438,7 +438,7 @@ func buildCards(m MetricsSnapshot, width int) []cardData {
 		renderDiskCard(m.Disks, m.DiskIO),
 		renderBatteryCard(m.Batteries, m.Thermal),
 		renderProcessCard(m.TopProcesses),
-		renderNetworkCard(m.Network, m.NetworkHistory, m.Proxy, width),
+		renderNetworkCard(m.Network, m.NetworkHistory, m.Proxy, m.Wifi, width),
 	}
 	// Sensors card disabled - redundant with CPU temp
 	// if hasSensorData(m.Sensors) {
@@ -452,7 +452,7 @@ func miniBar(percent float64) string {
 	return colorizePercent(percent, strings.Repeat("▮", filled)+strings.Repeat("▯", 5-filled))
 }
 
-func renderNetworkCard(netStats []NetworkStatus, history NetworkHistory, proxy ProxyStatus, cardWidth int) cardData {
+func renderNetworkCard(netStats []NetworkStatus, history NetworkHistory, proxy ProxyStatus, wifi WifiStatus, cardWidth int) cardData {
 	var lines []string
 	var totalRx, totalTx float64
 	var primaryIP string
@@ -469,9 +469,6 @@ func renderNetworkCard(netStats []NetworkStatus, history NetworkHistory, proxy P
 		lines = []string{subtleStyle.Render("Collecting...")}
 	} else {
 		// Calculate dynamic width
-		// Layout: "Down   " (7) + graph + "  " (2) + rate (approx 10-12)
-		// Safe margin: 22 chars.
-		// We target 16 chars to match progressBar implementation for visual consistency.
 		graphWidth := min(max(cardWidth-22, 5), 16)
 
 		// sparkline graphs
@@ -479,13 +476,40 @@ func renderNetworkCard(netStats []NetworkStatus, history NetworkHistory, proxy P
 		txSparkline := sparkline(history.TxHistory, totalTx, graphWidth)
 		lines = append(lines, fmt.Sprintf("Down   %s  %s", rxSparkline, formatRate(totalRx)))
 		lines = append(lines, fmt.Sprintf("Up     %s  %s", txSparkline, formatRate(totalTx)))
-		// Show proxy and IP on one line.
+
+		// Wi-Fi details line.
+		if wifi.Connected {
+			wifiLine := "Wi-Fi"
+			if wifi.SSID != "" {
+				wifiLine = wifi.SSID
+			}
+			if wifi.PHYMode != "" {
+				wifiLine += " · " + wifi.PHYMode
+			}
+			if wifi.Channel != "" {
+				// Show band info (e.g., "5GHz")
+				if strings.Contains(wifi.Channel, "5GHz") {
+					wifiLine += " · 5GHz"
+				} else if strings.Contains(wifi.Channel, "2GHz") {
+					wifiLine += " · 2.4GHz"
+				}
+			}
+			lines = append(lines, wifiLine)
+			if wifi.SignalDBm != 0 {
+				lines = append(lines, "Signal "+wifiSignalBar(wifi.SignalDBm))
+			}
+		}
+
+		// Show proxy, IP, and LAN devices on one line.
 		var infoParts []string
 		if proxy.Enabled {
 			infoParts = append(infoParts, "Proxy "+proxy.Type)
 		}
 		if primaryIP != "" {
 			infoParts = append(infoParts, primaryIP)
+		}
+		if wifi.LANDevices > 0 {
+			infoParts = append(infoParts, fmt.Sprintf("%d LAN", wifi.LANDevices))
 		}
 		if len(infoParts) > 0 {
 			lines = append(lines, strings.Join(infoParts, " · "))
