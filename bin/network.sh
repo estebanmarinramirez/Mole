@@ -32,6 +32,7 @@ show_network_help() {
     echo ""
     echo -e "${BLUE}Usage:${NC}"
     echo "  mo network               Full network report"
+    echo "  mo network --ui          Interactive dashboard (TUI)"
     echo "  mo network --quick       Interfaces + Wi-Fi + LAN devices only"
     echo "  mo network --scan <ip>   Deep scan a specific host"
     echo "  mo network --connections Active connections by process"
@@ -64,6 +65,10 @@ main() {
         case "$1" in
             --quick | -q)
                 mode="quick"
+                shift
+                ;;
+            --ui | -u)
+                mode="ui"
                 shift
                 ;;
             --scan | -s)
@@ -125,6 +130,16 @@ main() {
             network_full_report
             echo ""
             show_network_summary
+            ;;
+        ui)
+            local GO_BIN="$SCRIPT_DIR/bin/network-go"
+            if [[ -x "$GO_BIN" ]]; then
+                exec "$GO_BIN" "$@"
+            else
+                echo "Network dashboard binary not found."
+                echo "Build from source: cd cmd/network && go build -o ../../bin/network-go ."
+                exit 1
+            fi
             ;;
         quick)
             show_interfaces

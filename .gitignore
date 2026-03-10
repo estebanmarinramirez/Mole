@@ -84,3 +84,4 @@ CLAUDE.md
 # Compiled Go binaries (symlinked from Homebrew Cellar)
 bin/status-go
 bin/analyze-go
+bin/network-go
