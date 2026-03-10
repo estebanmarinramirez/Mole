@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const refreshInterval = 2 * time.Second
+const refreshInterval = 3 * time.Second
 
 type tickMsg struct{}
 type metricsMsg struct{ data NetworkSnapshot }
@@ -152,6 +152,7 @@ func (m model) View() string {
 
 func (m model) collectCmd() tea.Cmd {
 	return func() tea.Msg {
+		m.collector.SetActiveTab(m.activeTab)
 		data := m.collector.Collect()
 		return metricsMsg{data: data}
 	}

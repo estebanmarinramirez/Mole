@@ -15,10 +15,15 @@ import (
 )
 
 // Collector gathers network metrics with caching for slow calls.
+// All subprocess calls are cached with appropriate TTLs to minimize
+// system load. The active tab controls which collectors refresh eagerly.
 type Collector struct {
 	mu sync.Mutex
 
-	// Fast metrics (1-2s).
+	// Which tab is active (set by model before Collect).
+	activeTab int
+
+	// Fast metrics (gopsutil only - no subprocess).
 	prevNet   map[string]psnet.IOCountersStat
 	lastNetAt time.Time
 
@@ -30,7 +35,7 @@ type Collector struct {
 	signalBuf *RingBuf
 	snrBuf    *RingBuf
 
-	// Slow caches.
+	// Cached results with TTLs.
 	cachedWifi      WifiInfo
 	cachedNearby    []NearbyNetwork
 	lastWifiAt      time.Time
@@ -40,19 +45,27 @@ type Collector struct {
 	cachedDevices   []LANDevice
 	lastDevicesAt   time.Time
 	cachedGateway   string
-	lastGatewayAt   time.Time
+	cachedConns     []ConnectionInfo
+	cachedListeners []ListenerInfo
+	lastConnsAt     time.Time
+	cachedDNSOk     bool
+	lastDNSAt       time.Time
+	cachedGWMs      float64
+	cachedNetMs     float64
+	lastPingAt      time.Time
 
-	// DNS reverse cache.
-	dnsCache     map[string]string
-	dnsCacheMu   sync.RWMutex
+	// DNS reverse cache + rate limiter.
+	dnsCache   map[string]string
+	dnsCacheMu sync.RWMutex
+	dnsSem     chan struct{} // Limits concurrent DNS lookups.
 }
 
 // RingBuf is a fixed-size circular buffer.
 type RingBuf struct {
-	data  []float64
-	idx   int
-	size  int
-	cap   int
+	data []float64
+	idx  int
+	size int
+	cap  int
 }
 
 func NewRingBuf(capacity int) *RingBuf {
@@ -83,22 +96,43 @@ func (r *RingBuf) Slice() []float64 {
 
 func NewCollector() *Collector {
 	return &Collector{
-		prevNet:  make(map[string]psnet.IOCountersStat),
-		rxBuf:    NewRingBuf(120),
-		txBuf:    NewRingBuf(120),
+		prevNet:   make(map[string]psnet.IOCountersStat),
+		rxBuf:     NewRingBuf(120),
+		txBuf:     NewRingBuf(120),
 		signalBuf: NewRingBuf(60),
 		snrBuf:    NewRingBuf(60),
-		dnsCache: make(map[string]string),
+		dnsCache:  make(map[string]string),
+		dnsSem:    make(chan struct{}, 3), // Max 3 concurrent DNS lookups.
 	}
 }
 
-// Collect performs one snapshot collection. Slow items are cached.
+// SetActiveTab tells the collector which tab is visible so it can skip
+// heavy collection for tabs the user isn't looking at.
+func (c *Collector) SetActiveTab(tab int) {
+	c.mu.Lock()
+	c.activeTab = tab
+	c.mu.Unlock()
+}
+
+// Collect performs one snapshot collection.
+// Only gopsutil IO counters run every tick (no subprocess).
+// All subprocess calls are cached with TTLs:
+//   - Connections (lsof x2): 5s
+//   - Wi-Fi (system_profiler): 15-30s depending on tab
+//   - Devices (arp): 10-15s depending on tab
+//   - External IP (dig): 60s
+//   - DNS check (dig): 15s, only on overview tab
+//   - Ping (ping x2): 10s, only on overview tab
 func (c *Collector) Collect() NetworkSnapshot {
 	now := time.Now()
 	var snap NetworkSnapshot
 	var wg sync.WaitGroup
 
-	// --- Fast metrics (every tick) ---
+	c.mu.Lock()
+	tab := c.activeTab
+	c.mu.Unlock()
+
+	// --- Interface IO counters (gopsutil, no subprocess, always runs) ---
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -114,19 +148,35 @@ func (c *Collector) Collect() NetworkSnapshot {
 		c.txBuf.Add(totalTx)
 	}()
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		snap.Connections = c.collectConnections()
-		snap.Listeners = c.collectListeners()
-	}()
-
-	// --- Medium metrics (5-10s cache) ---
+	// --- Connections (lsof x2, cached 5s) ---
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		c.mu.Lock()
-		if now.Sub(c.lastWifiAt) > 10*time.Second {
+		if now.Sub(c.lastConnsAt) > 5*time.Second {
+			c.mu.Unlock()
+			conns := c.collectConnections()
+			listeners := c.collectListeners()
+			c.mu.Lock()
+			c.cachedConns = conns
+			c.cachedListeners = listeners
+			c.lastConnsAt = now
+		}
+		snap.Connections = c.cachedConns
+		snap.Listeners = c.cachedListeners
+		c.mu.Unlock()
+	}()
+
+	// --- Wi-Fi (system_profiler, cached 15-30s) ---
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ttl := 30 * time.Second
+		if tab == 0 || tab == 4 {
+			ttl = 15 * time.Second // Faster when user is looking at Wi-Fi info.
+		}
+		c.mu.Lock()
+		if now.Sub(c.lastWifiAt) > ttl {
 			c.mu.Unlock()
 			wifi, nearby := collectWifiInfo()
 			c.mu.Lock()
@@ -143,11 +193,16 @@ func (c *Collector) Collect() NetworkSnapshot {
 		c.mu.Unlock()
 	}()
 
+	// --- LAN Devices (arp, cached 10-15s) ---
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		ttl := 15 * time.Second
+		if tab == 0 || tab == 3 {
+			ttl = 10 * time.Second
+		}
 		c.mu.Lock()
-		if now.Sub(c.lastDevicesAt) > 5*time.Second {
+		if now.Sub(c.lastDevicesAt) > ttl {
 			c.mu.Unlock()
 			devices := c.collectDevices()
 			c.mu.Lock()
@@ -158,12 +213,12 @@ func (c *Collector) Collect() NetworkSnapshot {
 		c.mu.Unlock()
 	}()
 
-	// --- Slow metrics (30s cache) ---
+	// --- External IP (dig, cached 60s) ---
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		c.mu.Lock()
-		if now.Sub(c.lastExtAt) > 30*time.Second {
+		if now.Sub(c.lastExtAt) > 60*time.Second {
 			c.mu.Unlock()
 			extIP, vpn := collectExternalInfo()
 			c.mu.Lock()
@@ -176,14 +231,44 @@ func (c *Collector) Collect() NetworkSnapshot {
 		c.mu.Unlock()
 	}()
 
+	// --- DNS check + Ping (cached, only on overview tab) ---
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		snap.DNSOk = checkDNS()
-		gw, gwMs := c.getGatewayLatency()
-		snap.GatewayIP = gw
-		snap.GatewayMs = gwMs
-		snap.InternetMs = pingHost("8.8.8.8")
+
+		c.mu.Lock()
+		needDNS := now.Sub(c.lastDNSAt) > 15*time.Second && tab == 0
+		needPing := now.Sub(c.lastPingAt) > 10*time.Second && tab == 0
+		c.mu.Unlock()
+
+		if needDNS {
+			dnsOk := checkDNS()
+			c.mu.Lock()
+			c.cachedDNSOk = dnsOk
+			c.lastDNSAt = now
+			c.mu.Unlock()
+		}
+
+		if needPing {
+			gw := c.getGateway()
+			var gwMs float64
+			if gw != "" {
+				gwMs = pingHost(gw)
+			}
+			netMs := pingHost("8.8.8.8")
+			c.mu.Lock()
+			c.cachedGWMs = gwMs
+			c.cachedNetMs = netMs
+			c.lastPingAt = now
+			c.mu.Unlock()
+		}
+
+		c.mu.Lock()
+		snap.DNSOk = c.cachedDNSOk
+		snap.GatewayIP = c.cachedGateway
+		snap.GatewayMs = c.cachedGWMs
+		snap.InternetMs = c.cachedNetMs
+		c.mu.Unlock()
 	}()
 
 	wg.Wait()
@@ -211,8 +296,12 @@ func isNoise(name string) bool {
 
 // isIdleInterface returns true if the interface has no traffic and no IP.
 func isIdleInterface(iface InterfaceInfo) bool {
-	if iface.IP != "" { return false }
-	if iface.RxRateMBs > 0 || iface.TxRateMBs > 0 { return false }
+	if iface.IP != "" {
+		return false
+	}
+	if iface.RxRateMBs > 0 || iface.TxRateMBs > 0 {
+		return false
+	}
 	return true
 }
 
@@ -258,20 +347,28 @@ func (c *Collector) collectInterfaces(now time.Time) []InterfaceInfo {
 			if prev, ok := c.prevNet[cur.Name]; ok {
 				rx = float64(cur.BytesRecv-prev.BytesRecv) / 1024.0 / 1024.0 / elapsed
 				tx = float64(cur.BytesSent-prev.BytesSent) / 1024.0 / 1024.0 / elapsed
-				if rx < 0 { rx = 0 }
-				if tx < 0 { tx = 0 }
+				if rx < 0 {
+					rx = 0
+				}
+				if tx < 0 {
+					tx = 0
+				}
 			}
 		}
 
 		ifType := "Ethernet"
-		if cur.Name == "en0" { ifType = "Wi-Fi" }
+		if cur.Name == "en0" {
+			ifType = "Wi-Fi"
+		}
 		if strings.HasPrefix(cur.Name, "utun") {
 			ifType = "VPN"
 			if ip == "" {
 				ip = getUtunIP(cur.Name)
 			}
 		}
-		if strings.HasPrefix(cur.Name, "en1") { ifType = "Ethernet" }
+		if strings.HasPrefix(cur.Name, "en1") {
+			ifType = "Ethernet"
+		}
 
 		result = append(result, InterfaceInfo{
 			Name: cur.Name, IP: ip, MAC: ifMACs[cur.Name],
@@ -302,12 +399,16 @@ func getUtunIP(name string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "ifconfig", name).Output()
-	if err != nil { return "" }
+	if err != nil {
+		return ""
+	}
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "inet ") {
 			parts := strings.Fields(line)
-			if len(parts) >= 2 { return parts[1] }
+			if len(parts) >= 2 {
+				return parts[1]
+			}
 		}
 	}
 	return ""
@@ -321,13 +422,19 @@ func (c *Collector) collectConnections() []ConnectionInfo {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "lsof", "-iTCP", "-sTCP:ESTABLISHED", "-P", "-n").Output()
-	if err != nil { return nil }
+	if err != nil {
+		return nil
+	}
 
 	var result []ConnectionInfo
 	for _, line := range strings.Split(string(out), "\n") {
-		if strings.HasPrefix(line, "COMMAND") || line == "" { continue }
+		if strings.HasPrefix(line, "COMMAND") || line == "" {
+			continue
+		}
 		fields := strings.Fields(line)
-		if len(fields) < 9 { continue }
+		if len(fields) < 9 {
+			continue
+		}
 
 		proc := fields[0]
 		pid, _ := strconv.Atoi(fields[1])
@@ -335,11 +442,15 @@ func (c *Collector) collectConnections() []ConnectionInfo {
 
 		// Parse "10.8.0.8:57782->149.154.167.51:443"
 		parts := strings.SplitN(nameCol, "->", 2)
-		if len(parts) != 2 { continue }
+		if len(parts) != 2 {
+			continue
+		}
 
 		localParts := splitHostPort(parts[0])
 		remoteParts := splitHostPort(parts[1])
-		if remoteParts.ip == "127.0.0.1" || remoteParts.ip == "::1" { continue }
+		if remoteParts.ip == "127.0.0.1" || remoteParts.ip == "::1" {
+			continue
+		}
 
 		hostname := c.reverseDNS(remoteParts.ip)
 
@@ -357,25 +468,35 @@ func (c *Collector) collectListeners() []ListenerInfo {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "lsof", "-iTCP", "-sTCP:LISTEN", "-P", "-n").Output()
-	if err != nil { return nil }
+	if err != nil {
+		return nil
+	}
 
 	seen := make(map[string]bool)
 	var result []ListenerInfo
 	for _, line := range strings.Split(string(out), "\n") {
-		if strings.HasPrefix(line, "COMMAND") || line == "" { continue }
+		if strings.HasPrefix(line, "COMMAND") || line == "" {
+			continue
+		}
 		fields := strings.Fields(line)
-		if len(fields) < 9 { continue }
+		if len(fields) < 9 {
+			continue
+		}
 
 		proc := fields[0]
 		pid, _ := strconv.Atoi(fields[1])
 		nameCol := fields[8]
 		hp := splitHostPort(nameCol)
 		key := fmt.Sprintf("%s:%d", proc, hp.port)
-		if seen[key] { continue }
+		if seen[key] {
+			continue
+		}
 		seen[key] = true
 
 		addr := "localhost"
-		if strings.HasPrefix(nameCol, "*:") { addr = "all" }
+		if strings.HasPrefix(nameCol, "*:") {
+			addr = "all"
+		}
 
 		result = append(result, ListenerInfo{Process: proc, PID: pid, Port: hp.port, Addr: addr})
 	}
@@ -389,13 +510,15 @@ type hostPort struct {
 
 func splitHostPort(s string) hostPort {
 	idx := strings.LastIndex(s, ":")
-	if idx < 0 { return hostPort{ip: s} }
+	if idx < 0 {
+		return hostPort{ip: s}
+	}
 	ip := s[:idx]
 	port, _ := strconv.Atoi(s[idx+1:])
 	return hostPort{ip: ip, port: port}
 }
 
-// --- Reverse DNS with caching ---
+// --- Reverse DNS with caching + rate limiting ---
 
 func (c *Collector) reverseDNS(ip string) string {
 	c.dnsCacheMu.RLock()
@@ -405,26 +528,32 @@ func (c *Collector) reverseDNS(ip string) string {
 	}
 	c.dnsCacheMu.RUnlock()
 
-	// Non-blocking DNS lookup.
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		out, err := exec.CommandContext(ctx, "host", ip).Output()
-		hostname := ""
-		if err == nil {
-			for _, line := range strings.Split(string(out), "\n") {
-				if strings.Contains(line, "domain name pointer") {
-					parts := strings.Fields(line)
-					if len(parts) > 0 {
-						hostname = strings.TrimSuffix(parts[len(parts)-1], ".")
+	// Rate-limited non-blocking DNS lookup.
+	select {
+	case c.dnsSem <- struct{}{}:
+		go func() {
+			defer func() { <-c.dnsSem }()
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			out, err := exec.CommandContext(ctx, "host", ip).Output()
+			hostname := ""
+			if err == nil {
+				for _, line := range strings.Split(string(out), "\n") {
+					if strings.Contains(line, "domain name pointer") {
+						parts := strings.Fields(line)
+						if len(parts) > 0 {
+							hostname = strings.TrimSuffix(parts[len(parts)-1], ".")
+						}
 					}
 				}
 			}
-		}
-		c.dnsCacheMu.Lock()
-		c.dnsCache[ip] = hostname
-		c.dnsCacheMu.Unlock()
-	}()
+			c.dnsCacheMu.Lock()
+			c.dnsCache[ip] = hostname
+			c.dnsCacheMu.Unlock()
+		}()
+	default:
+		// Semaphore full; skip this lookup, will retry next cycle.
+	}
 
 	return ""
 }
@@ -435,7 +564,9 @@ func (c *Collector) collectDevices() []LANDevice {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "arp", "-a").Output()
-	if err != nil { return nil }
+	if err != nil {
+		return nil
+	}
 
 	gw := c.getGateway()
 	selfIP := getSelfIP()
@@ -444,13 +575,21 @@ func (c *Collector) collectDevices() []LANDevice {
 
 	var result []LANDevice
 	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, "incomplete") { continue }
-		if strings.Contains(line, "ff:ff:ff:ff:ff:ff") { continue }
-		if strings.Contains(line, "01:00:5e") { continue }
+		if strings.Contains(line, "incomplete") {
+			continue
+		}
+		if strings.Contains(line, "ff:ff:ff:ff:ff:ff") {
+			continue
+		}
+		if strings.Contains(line, "01:00:5e") {
+			continue
+		}
 
 		ip := ipRe.FindString(line)
 		mac := macRe.FindString(line)
-		if ip == "" || mac == "" { continue }
+		if ip == "" || mac == "" {
+			continue
+		}
 
 		// Skip multicast/broadcast ranges.
 		if strings.HasPrefix(ip, "224.") || strings.HasPrefix(ip, "239.") || strings.HasPrefix(ip, "255.") {
@@ -472,11 +611,15 @@ func (c *Collector) collectDevices() []LANDevice {
 func (c *Collector) getGateway() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.cachedGateway != "" { return c.cachedGateway }
+	if c.cachedGateway != "" {
+		return c.cachedGateway
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "route", "-n", "get", "default").Output()
-	if err != nil { return "" }
+	if err != nil {
+		return ""
+	}
 	for _, line := range strings.Split(string(out), "\n") {
 		if strings.Contains(line, "gateway") {
 			parts := strings.Fields(line)
@@ -491,7 +634,9 @@ func (c *Collector) getGateway() string {
 
 func (c *Collector) getGatewayLatency() (string, float64) {
 	gw := c.getGateway()
-	if gw == "" { return "", 0 }
+	if gw == "" {
+		return "", 0
+	}
 	ms := pingHost(gw)
 	return gw, ms
 }
@@ -500,7 +645,9 @@ func getSelfIP() string {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "ipconfig", "getifaddr", "en0").Output()
-	if err != nil { return "" }
+	if err != nil {
+		return ""
+	}
 	return strings.TrimSpace(string(out))
 }
 
@@ -511,9 +658,11 @@ func collectExternalInfo() (string, bool) {
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "dig", "+short", "myip.opendns.com", "@resolver1.opendns.com").Output()
 	extIP := ""
-	if err == nil { extIP = strings.TrimSpace(string(out)) }
+	if err == nil {
+		extIP = strings.TrimSpace(string(out))
+	}
 
-	// Check VPN.
+	// Check VPN via interface list (no subprocess).
 	ifaces, _ := psnet.Interfaces()
 	vpn := false
 	for _, iface := range ifaces {
@@ -539,7 +688,9 @@ func pingHost(host string) float64 {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "ping", "-c", "1", "-W", "2", host).Output()
-	if err != nil { return 0 }
+	if err != nil {
+		return 0
+	}
 	re := regexp.MustCompile(`time=([0-9.]+)`)
 	m := re.FindStringSubmatch(string(out))
 	if len(m) >= 2 {
@@ -562,12 +713,19 @@ func aggregateProcessTraffic(conns []ConnectionInfo) []ProcessTraffic {
 		p.Conns++
 		found := false
 		for _, ip := range p.IPs {
-			if ip == c.RemoteIP { found = true; break }
+			if ip == c.RemoteIP {
+				found = true
+				break
+			}
 		}
-		if !found { p.IPs = append(p.IPs, c.RemoteIP) }
+		if !found {
+			p.IPs = append(p.IPs, c.RemoteIP)
+		}
 	}
 	var result []ProcessTraffic
-	for _, p := range m { result = append(result, *p) }
+	for _, p := range m {
+		result = append(result, *p)
+	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Conns > result[j].Conns })
 	return result
 }
