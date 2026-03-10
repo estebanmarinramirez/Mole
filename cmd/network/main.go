@@ -24,7 +24,7 @@ func main() {
 
 func runJSON() {
 	c := NewCollector()
-	// First collect initializes.
+	// First collect initializes counters.
 	c.Collect()
 	time.Sleep(2 * time.Second)
 	snap := c.Collect()
@@ -35,6 +35,7 @@ func runJSON() {
 		fmt.Fprintf(os.Stderr, "JSON error: %v\n", err)
 		os.Exit(1)
 	}
+	os.Exit(0) // Force exit; background DNS goroutines would otherwise keep process alive.
 }
 
 func runTUI(tab int) {

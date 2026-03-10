@@ -209,6 +209,13 @@ func isNoise(name string) bool {
 	return false
 }
 
+// isIdleInterface returns true if the interface has no traffic and no IP.
+func isIdleInterface(iface InterfaceInfo) bool {
+	if iface.IP != "" { return false }
+	if iface.RxRateMBs > 0 || iface.TxRateMBs > 0 { return false }
+	return true
+}
+
 func (c *Collector) collectInterfaces(now time.Time) []InterfaceInfo {
 	stats, err := psnet.IOCounters(true)
 	if err != nil {
@@ -277,10 +284,18 @@ func (c *Collector) collectInterfaces(now time.Time) []InterfaceInfo {
 		c.prevNet[s.Name] = s
 	}
 
+	// Sort by traffic (descending), then filter idle utun interfaces.
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].RxRateMBs+result[i].TxRateMBs > result[j].RxRateMBs+result[j].TxRateMBs
 	})
-	return result
+	var filtered []InterfaceInfo
+	for _, iface := range result {
+		if strings.HasPrefix(iface.Name, "utun") && isIdleInterface(iface) {
+			continue
+		}
+		filtered = append(filtered, iface)
+	}
+	return filtered
 }
 
 func getUtunIP(name string) string {
@@ -436,6 +451,11 @@ func (c *Collector) collectDevices() []LANDevice {
 		ip := ipRe.FindString(line)
 		mac := macRe.FindString(line)
 		if ip == "" || mac == "" { continue }
+
+		// Skip multicast/broadcast ranges.
+		if strings.HasPrefix(ip, "224.") || strings.HasPrefix(ip, "239.") || strings.HasPrefix(ip, "255.") {
+			continue
+		}
 
 		vendor := lookupVendor(mac)
 		hostname := c.reverseDNS(ip)

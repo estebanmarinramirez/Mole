@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -27,9 +28,9 @@ const (
 	iconConns    = "◎"
 	iconDevices  = "◧"
 	iconWifi     = "◉"
+	iconPower    = "◪"
+	iconProcs    = "❊"
 )
-
-var tabIcons = []string{iconOverview, iconTraffic, iconConns, iconDevices, iconWifi}
 
 // ==================== Layout Primitives ====================
 
@@ -44,7 +45,7 @@ func cardHeader(icon, title string, width int) string {
 	return header
 }
 
-// progressBar renders a 16-char bar using █░ (matching status-go).
+// progressBar renders a 16-char bar using fill/empty (matching status-go).
 func progressBar(percent float64) string {
 	total := 16
 	if percent < 0 { percent = 0 }
@@ -118,10 +119,10 @@ func sparklineSignal(history []float64, width int) string {
 	blocks := []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
 	data := history
 	if len(data) > width { data = data[len(data)-width:] }
+	for len(data) < width { data = append([]float64{-100}, data...) }
 
 	var b strings.Builder
 	for _, v := range data {
-		// Map RSSI -100..-30 to 0..7
 		norm := (v + 100) / 70.0
 		if norm < 0 { norm = 0 }
 		if norm > 1 { norm = 1 }
@@ -142,7 +143,9 @@ func signalBar(rssi int) string {
 	case rssi > -75: bars = 2
 	case rssi > -85: bars = 1
 	}
-	return okStyle.Render(strings.Repeat("▮", bars)) + subtleStyle.Render(strings.Repeat("▯", 5-bars))
+	filled := okStyle.Render(strings.Repeat("▮", bars))
+	empty := subtleStyle.Render(strings.Repeat("▯", 5-bars))
+	return filled + empty
 }
 
 func colorSignal(rssi int) string {
@@ -156,8 +159,32 @@ func colorSignal(rssi int) string {
 	}
 }
 
+func signalQuality(rssi int) string {
+	switch {
+	case rssi == 0:  return ""
+	case rssi > -50: return okStyle.Render("Excellent")
+	case rssi > -60: return okStyle.Render("Good")
+	case rssi > -70: return warnStyle.Render("Fair")
+	default:         return dangerStyle.Render("Weak")
+	}
+}
+
+// estimateDistance returns rough distance in meters from RSSI using free-space path loss.
+// Assumes 5GHz (5180 MHz) and reference RSSI -40 dBm at 1m.
+func estimateDistance(rssi int, band string) string {
+	if rssi == 0 || rssi > -20 { return "" }
+	// Free-space path loss: d = 10^((txPower - rssi) / (10 * n))
+	// txPower ~ -40 dBm at 1m, n ~ 2.7 for indoor
+	n := 2.7
+	d := math.Pow(10, float64(-40-rssi)/(10*n))
+	if d < 1 { return "< 1m" }
+	if d > 50 { return "> 50m" }
+	return fmt.Sprintf("~%.0fm", d)
+}
+
 func formatRate(mb float64) string {
-	if mb < 0.001 { return subtleStyle.Render("0 MB/s") }
+	if mb < 0.001 { return subtleStyle.Render("0 B/s") }
+	if mb < 0.01 { return fmt.Sprintf("%.1f KB/s", mb*1024) }
 	if mb < 1 { return fmt.Sprintf("%.0f KB/s", mb*1024) }
 	if mb < 10 { return fmt.Sprintf("%.2f MB/s", mb) }
 	return fmt.Sprintf("%.0f MB/s", mb)
@@ -174,15 +201,13 @@ func renderTabs(active int, width int) string {
 	var tabs []string
 	for i, name := range tabNames {
 		num := fmt.Sprintf("%d", i+1)
-		label := num + " " + name
 		if i == active {
-			tabs = append(tabs, titleStyle.Render(label))
+			tabs = append(tabs, titleStyle.Render("["+num+"] "+name))
 		} else {
-			tabs = append(tabs, subtleStyle.Render(label))
+			tabs = append(tabs, subtleStyle.Render(" "+num+"  "+name))
 		}
 	}
-	bar := "  " + strings.Join(tabs, subtleStyle.Render("  "))
-	return bar
+	return "  " + strings.Join(tabs, " ")
 }
 
 // ==================== Header ====================
@@ -194,11 +219,10 @@ func renderHeader(snap NetworkSnapshot, width int) string {
 	if snap.Wifi.Connected {
 		parts = append(parts, signalBar(snap.Wifi.SignalDBm)+" "+colorSignal(snap.Wifi.SignalDBm))
 	}
+	parts = append(parts, subtleStyle.Render(fmt.Sprintf("%d conns", len(snap.Connections))))
+	parts = append(parts, subtleStyle.Render(fmt.Sprintf("%d devs", len(snap.LANDevices))))
 	if snap.VPNActive {
 		parts = append(parts, okStyle.Render("VPN"))
-	}
-	if snap.ExternalIP != "" {
-		parts = append(parts, subtleStyle.Render(snap.ExternalIP))
 	}
 
 	info := strings.Join(parts, subtleStyle.Render(" · "))
@@ -214,58 +238,68 @@ func renderOverview(snap NetworkSnapshot, rxHist, txHist []float64, width int) s
 	if cw < 40 { cw = 40 }
 	var sb strings.Builder
 
-	// Interfaces card
+	// Interfaces -- compact: name, IP, type, rate
 	sb.WriteString(cardHeader(iconOverview, "Interfaces", cw) + "\n")
 	for _, iface := range snap.Interfaces {
 		dot := subtleStyle.Render("●")
 		if iface.RxRateMBs+iface.TxRateMBs > 0.01 { dot = okStyle.Render("●") }
-		rate := ""
+		rate := subtleStyle.Render("idle")
 		if iface.RxRateMBs > 0 || iface.TxRateMBs > 0 {
-			rate = subtleStyle.Render(fmt.Sprintf("  %s/%s", formatRate(iface.RxRateMBs), formatRate(iface.TxRateMBs)))
+			rate = fmt.Sprintf("Rx %s  Tx %s", formatRate(iface.RxRateMBs), formatRate(iface.TxRateMBs))
 		}
-		sb.WriteString(fmt.Sprintf("%s %-8s %-16s %-18s %s%s\n",
-			dot, iface.Name, iface.IP, iface.MAC, subtleStyle.Render(iface.Type), rate))
+		sb.WriteString(fmt.Sprintf("%s %-8s %-16s %-10s %s\n",
+			dot, iface.Name, iface.IP, subtleStyle.Render(iface.Type), rate))
 	}
 
-	// Wi-Fi card
+	// Wi-Fi -- compact: 3 dense lines
 	if snap.Wifi.Connected {
 		sb.WriteString("\n" + cardHeader(iconWifi, "Wi-Fi", cw) + "\n")
-		ssid := snap.Wifi.SSID
-		if ssid == "" { ssid = subtleStyle.Render("(redacted)") }
-		sb.WriteString(fmt.Sprintf("SSID   %s\n", ssid))
-		sb.WriteString(fmt.Sprintf("Signal %s  %s  %s\n", signalBar(snap.Wifi.SignalDBm), colorSignal(snap.Wifi.SignalDBm), snap.Wifi.Quality))
-		sb.WriteString(fmt.Sprintf("Chan   %s  %s\n", snap.Wifi.Channel, primaryStyle.Render(snap.Wifi.Band)))
-		sb.WriteString(fmt.Sprintf("Mode   %s  %s\n", snap.Wifi.PHYMode, snap.Wifi.Security))
-		if snap.Wifi.TxRate > 0 {
-			sb.WriteString(fmt.Sprintf("Rate   %d Mbps  SNR %d dB\n", snap.Wifi.TxRate, snap.Wifi.SNR))
+		// Line 1: Signal bar + dBm + quality + distance
+		sigLine := fmt.Sprintf("Signal %s  %s  %s", signalBar(snap.Wifi.SignalDBm), colorSignal(snap.Wifi.SignalDBm), signalQuality(snap.Wifi.SignalDBm))
+		dist := estimateDistance(snap.Wifi.SignalDBm, snap.Wifi.Band)
+		if dist != "" { sigLine += subtleStyle.Render("  "+dist) }
+		sb.WriteString(sigLine + "\n")
+		// Line 2: Channel + band + PHY + security
+		sb.WriteString(fmt.Sprintf("Chan   %s  %s  %s\n",
+			snap.Wifi.Channel, primaryStyle.Render(snap.Wifi.PHYMode), subtleStyle.Render(snap.Wifi.Security)))
+		// Line 3: Rate + SNR (if available)
+		if snap.Wifi.TxRate > 0 || snap.Wifi.SNR != 0 {
+			rateLine := "Link  "
+			if snap.Wifi.TxRate > 0 { rateLine += fmt.Sprintf(" %d Mbps", snap.Wifi.TxRate) }
+			if snap.Wifi.SNR != 0 { rateLine += fmt.Sprintf("  SNR %d dB", snap.Wifi.SNR) }
+			sb.WriteString(rateLine + "\n")
 		}
 	}
 
-	// Traffic card
+	// Traffic sparklines
 	graphW := min(cw-22, 16)
 	if graphW < 5 { graphW = 5 }
 	sb.WriteString("\n" + cardHeader(iconTraffic, "Traffic", cw) + "\n")
 	sb.WriteString(fmt.Sprintf("Down   %s  %s\n", sparkline(rxHist, graphW), formatRate(snap.TrafficRx)))
 	sb.WriteString(fmt.Sprintf("Up     %s  %s\n", sparkline(txHist, graphW), formatRate(snap.TrafficTx)))
 
-	// Connectivity card
-	sb.WriteString("\n" + cardHeader("◎", "Connectivity", cw) + "\n")
-	if snap.ExternalIP != "" {
-		sb.WriteString(fmt.Sprintf("ExtIP  %s\n", snap.ExternalIP))
-	}
-	if snap.VPNActive {
-		sb.WriteString(fmt.Sprintf("VPN    %s\n", okStyle.Render("Active")))
-	}
-	dnsLabel := okStyle.Render("OK")
-	if !snap.DNSOk { dnsLabel = dangerStyle.Render("FAIL") }
-	sb.WriteString(fmt.Sprintf("DNS    %s\n", dnsLabel))
-	if snap.GatewayIP != "" {
-		latency := subtleStyle.Render("unreachable")
-		if snap.GatewayMs > 0 { latency = fmt.Sprintf("%.1fms", snap.GatewayMs) }
-		sb.WriteString(fmt.Sprintf("GW     %s  %s\n", snap.GatewayIP, latency))
-	}
-	if snap.InternetMs > 0 {
-		sb.WriteString(fmt.Sprintf("Ping   %.1fms\n", snap.InternetMs))
+	// Connectivity -- compact: single-line items
+	sb.WriteString("\n" + cardHeader(iconConns, "Connectivity", cw) + "\n")
+	var connParts []string
+	if snap.ExternalIP != "" { connParts = append(connParts, snap.ExternalIP) }
+	if snap.VPNActive { connParts = append(connParts, okStyle.Render("VPN")) }
+	dnsLabel := okStyle.Render("DNS OK")
+	if !snap.DNSOk { dnsLabel = dangerStyle.Render("DNS FAIL") }
+	connParts = append(connParts, dnsLabel)
+	sb.WriteString(strings.Join(connParts, subtleStyle.Render(" · ")) + "\n")
+	// Gateway/ping line
+	if snap.GatewayIP != "" || snap.InternetMs > 0 {
+		gwLine := ""
+		if snap.GatewayIP != "" {
+			latText := subtleStyle.Render("n/a")
+			if snap.GatewayMs > 0 { latText = fmt.Sprintf("%.1fms", snap.GatewayMs) }
+			gwLine += fmt.Sprintf("GW %s %s", snap.GatewayIP, latText)
+		}
+		if snap.InternetMs > 0 {
+			if gwLine != "" { gwLine += subtleStyle.Render("  ") }
+			gwLine += fmt.Sprintf("Internet %.1fms", snap.InternetMs)
+		}
+		sb.WriteString(gwLine + "\n")
 	}
 
 	return sb.String()
@@ -278,25 +312,30 @@ func renderTraffic(snap NetworkSnapshot, rxHist, txHist []float64, width int) st
 	if cw < 40 { cw = 40 }
 	var sb strings.Builder
 
-	// Per-interface rates
+	// Per-interface rates with auto-scaled bars
 	sb.WriteString(cardHeader(iconTraffic, "Interface Rates", cw) + "\n")
+	maxRate := 0.01
 	for _, iface := range snap.Interfaces {
-		bar := miniBar5(iface.RxRateMBs+iface.TxRateMBs, 10.0)
+		r := iface.RxRateMBs + iface.TxRateMBs
+		if r > maxRate { maxRate = r }
+	}
+	for _, iface := range snap.Interfaces {
+		bar := miniBar5(iface.RxRateMBs+iface.TxRateMBs, maxRate*1.2)
 		sb.WriteString(fmt.Sprintf("%-8s %s  Rx %-12s Tx %s\n",
 			iface.Name, bar, formatRate(iface.RxRateMBs), formatRate(iface.TxRateMBs)))
 	}
 
-	// Bandwidth sparklines
+	// Bandwidth sparklines (wider)
 	graphW := min(cw-22, 40)
 	if graphW < 5 { graphW = 5 }
 	sb.WriteString("\n" + cardHeader(iconOverview, "Bandwidth", cw) + "\n")
 	sb.WriteString(fmt.Sprintf("Down   %s  %s\n", sparkline(rxHist, graphW), formatRate(snap.TrafficRx)))
 	sb.WriteString(fmt.Sprintf("Up     %s  %s\n", sparkline(txHist, graphW), formatRate(snap.TrafficTx)))
 
-	// Top talkers
-	sb.WriteString("\n" + cardHeader("❊", "Top Talkers", cw) + "\n")
+	// Top talkers with hostname when available
+	sb.WriteString("\n" + cardHeader(iconProcs, "Top Talkers", cw) + "\n")
 	procs := aggregateProcessTraffic(snap.Connections)
-	sb.WriteString(subtleStyle.Render(fmt.Sprintf("%-16s %5s  %s", "PROCESS", "CONNS", "REMOTE IPs")) + "\n")
+	sb.WriteString(subtleStyle.Render(fmt.Sprintf("%-16s %5s  %s", "PROCESS", "CONNS", "DESTINATIONS")) + "\n")
 	for i, p := range procs {
 		if i >= 10 { break }
 		ips := strings.Join(p.IPs, ", ")
@@ -327,20 +366,23 @@ func renderConnections(snap NetworkSnapshot, filter string, sortCol int, width i
 		filtered = f
 	}
 
-	sb.WriteString(cardHeader(iconConns, fmt.Sprintf("TCP Connections (%d)", len(filtered)), cw) + "\n")
+	// Header includes help hint
+	title := fmt.Sprintf("TCP Connections (%d)", len(filtered))
 	if filter != "" {
-		sb.WriteString(primaryStyle.Render("Filter: "+filter) + "\n")
+		title += "  " + primaryStyle.Render("filter: "+filter)
 	}
-	sb.WriteString(subtleStyle.Render("[/] filter  [s] sort  [esc] clear") + "\n\n")
+	sb.WriteString(cardHeader(iconConns, title, cw) + "\n")
 
+	// Column headers
 	sb.WriteString(subtleStyle.Render(fmt.Sprintf("%-14s %5s %-22s %5s  %s",
 		"PROCESS", "PID", "REMOTE", "PORT", "HOSTNAME")) + "\n")
+	sb.WriteString(lineStyle.Render(strings.Repeat("╌", min(cw, 76))) + "\n")
 
 	maxShow := 22
 	for i, c := range filtered {
 		if i >= maxShow { break }
 		host := c.Hostname
-		if host == "" { host = subtleStyle.Render("-") }
+		if host == "" { host = subtleStyle.Render("·") }
 		if len(host) > 22 { host = host[:19] + "..." }
 		sb.WriteString(fmt.Sprintf("%-14s %5d %-22s %5d  %s\n",
 			truncate(c.Process, 14), c.PID, c.RemoteIP, c.RemotePort, host))
@@ -350,9 +392,10 @@ func renderConnections(snap NetworkSnapshot, filter string, sortCol int, width i
 		sb.WriteString(subtleStyle.Render(fmt.Sprintf("... and %d more", len(filtered)-maxShow)) + "\n")
 	}
 
-	// Listeners
-	sb.WriteString("\n" + cardHeader("◪", fmt.Sprintf("Listening Ports (%d)", len(snap.Listeners)), cw) + "\n")
-	sb.WriteString(subtleStyle.Render(fmt.Sprintf("%-14s %6s  %s", "PROCESS", "PORT", "ADDRESS")) + "\n")
+	// Listeners with separator
+	sb.WriteString("\n" + cardHeader(iconPower, fmt.Sprintf("Listening (%d)", len(snap.Listeners)), cw) + "\n")
+	sb.WriteString(subtleStyle.Render(fmt.Sprintf("%-14s %6s  %s", "PROCESS", "PORT", "BIND")) + "\n")
+	sb.WriteString(lineStyle.Render(strings.Repeat("╌", min(cw, 40))) + "\n")
 	for i, l := range snap.Listeners {
 		if i >= 12 { break }
 		portStyle := subtleStyle
@@ -374,18 +417,19 @@ func renderDevices(snap NetworkSnapshot, width int) string {
 	sb.WriteString(cardHeader(iconDevices, fmt.Sprintf("LAN Devices (%d)", len(snap.LANDevices)), cw) + "\n")
 	sb.WriteString(subtleStyle.Render(fmt.Sprintf("%-16s %-18s %-12s %s",
 		"IP", "MAC", "VENDOR", "HOST")) + "\n")
+	sb.WriteString(lineStyle.Render(strings.Repeat("╌", min(cw, 76))) + "\n")
 
 	for _, d := range snap.LANDevices {
 		vendor := d.Vendor
-		if vendor == "" { vendor = subtleStyle.Render("-") }
+		if vendor == "" { vendor = subtleStyle.Render("·") }
 		host := d.Hostname
-		if host == "" { host = subtleStyle.Render("-") }
-		if len(host) > 24 { host = host[:21] + "..." }
+		if host == "" { host = subtleStyle.Render("·") }
+		if len(host) > 22 { host = host[:19] + "..." }
 
 		badges := ""
-		if d.IsGateway { badges += warnStyle.Render(" GW") }
-		if d.IsSelf    { badges += primaryStyle.Render(" ME") }
-		if d.IsHidden  { badges += dangerStyle.Render(" HIDDEN") }
+		if d.IsGateway { badges += " " + warnStyle.Render("GW") }
+		if d.IsSelf    { badges += " " + primaryStyle.Render("ME") }
+		if d.IsHidden  { badges += " " + dangerStyle.Render("HIDDEN") }
 
 		sb.WriteString(fmt.Sprintf("%-16s %-18s %-12s %s%s\n",
 			d.IP, d.MAC, truncate(vendor, 12), host, badges))
@@ -393,6 +437,22 @@ func renderDevices(snap NetworkSnapshot, width int) string {
 
 	if len(snap.LANDevices) == 0 {
 		sb.WriteString(subtleStyle.Render("Scanning...") + "\n")
+	}
+
+	// Vendor summary
+	if len(snap.LANDevices) > 3 {
+		vendorCounts := make(map[string]int)
+		for _, d := range snap.LANDevices {
+			v := d.Vendor
+			if v == "" { v = "Unknown" }
+			vendorCounts[v]++
+		}
+		sb.WriteString("\n" + subtleStyle.Render("Vendors: "))
+		var parts []string
+		for v, c := range vendorCounts {
+			parts = append(parts, fmt.Sprintf("%s(%d)", v, c))
+		}
+		sb.WriteString(subtleStyle.Render(strings.Join(parts, " ")) + "\n")
 	}
 
 	return sb.String()
@@ -407,42 +467,47 @@ func renderWifi(snap NetworkSnapshot, sigHist, snrHist []float64, width int) str
 
 	if !snap.Wifi.Connected {
 		sb.WriteString(cardHeader(iconWifi, "Wi-Fi", cw) + "\n")
-		sb.WriteString(subtleStyle.Render("Not connected") + "\n")
+		sb.WriteString(subtleStyle.Render("Not connected to a Wi-Fi network.") + "\n")
 		return sb.String()
 	}
 
-	// Current connection
+	// Current connection details
 	sb.WriteString(cardHeader(iconWifi, "Connection", cw) + "\n")
 	ssid := snap.Wifi.SSID
-	if ssid == "" { ssid = subtleStyle.Render("(redacted)") }
+	if ssid == "" { ssid = subtleStyle.Render("(redacted by macOS)") }
 	sb.WriteString(fmt.Sprintf("Net    %s\n", primaryStyle.Render(ssid)))
-	sb.WriteString(fmt.Sprintf("Signal %s  %s\n", signalBar(snap.Wifi.SignalDBm), colorSignal(snap.Wifi.SignalDBm)))
-	sb.WriteString(fmt.Sprintf("Chan   %s\n", snap.Wifi.Channel))
-	sb.WriteString(fmt.Sprintf("Band   %s  Mode %s\n", primaryStyle.Render(snap.Wifi.Band), snap.Wifi.PHYMode))
-	sb.WriteString(fmt.Sprintf("Sec    %s\n", snap.Wifi.Security))
+
+	// Signal with quality and distance
+	sigLine := fmt.Sprintf("Signal %s  %s  %s", signalBar(snap.Wifi.SignalDBm), colorSignal(snap.Wifi.SignalDBm), signalQuality(snap.Wifi.SignalDBm))
+	dist := estimateDistance(snap.Wifi.SignalDBm, snap.Wifi.Band)
+	if dist != "" { sigLine += subtleStyle.Render("  "+dist) }
+	sb.WriteString(sigLine + "\n")
+
+	sb.WriteString(fmt.Sprintf("Chan   %s  %s\n", snap.Wifi.Channel, primaryStyle.Render(snap.Wifi.Band)))
+	sb.WriteString(fmt.Sprintf("Mode   %s  %s\n", snap.Wifi.PHYMode, snap.Wifi.Security))
 	if snap.Wifi.TxRate > 0 {
 		sb.WriteString(fmt.Sprintf("Rate   %d Mbps\n", snap.Wifi.TxRate))
 	}
 	if snap.Wifi.SNR != 0 {
-		snrLabel := "Poor"
+		snrL := dangerStyle.Render("Poor")
 		switch {
-		case snap.Wifi.SNR > 40: snrLabel = "Excellent"
-		case snap.Wifi.SNR > 25: snrLabel = "Good"
-		case snap.Wifi.SNR > 15: snrLabel = "Fair"
+		case snap.Wifi.SNR > 40: snrL = okStyle.Render("Excellent")
+		case snap.Wifi.SNR > 25: snrL = okStyle.Render("Good")
+		case snap.Wifi.SNR > 15: snrL = warnStyle.Render("Fair")
 		}
-		sb.WriteString(fmt.Sprintf("SNR    %d dB (%s)\n", snap.Wifi.SNR, snrLabel))
+		sb.WriteString(fmt.Sprintf("SNR    %d dB %s\n", snap.Wifi.SNR, snrL))
 	}
 
-	// Signal history
+	// Signal strength over time
 	if len(sigHist) > 0 {
 		graphW := min(cw-15, 40)
 		if graphW < 5 { graphW = 5 }
-		sb.WriteString("\n" + cardHeader("◈", "Signal History", cw) + "\n")
+		sb.WriteString("\n" + cardHeader(iconTraffic, "Signal History", cw) + "\n")
 		sb.WriteString(fmt.Sprintf("RSSI   %s  %s\n", sparklineSignal(sigHist, graphW), colorSignal(snap.Wifi.SignalDBm)))
 	}
 
-	// Channel map
-	sb.WriteString("\n" + cardHeader("◎", "Channel Map", cw) + "\n")
+	// Channel map grouped by UNII band
+	sb.WriteString("\n" + cardHeader(iconConns, "Channel Map", cw) + "\n")
 	chLines := buildChannelMap(snap.Wifi, snap.NearbyNets)
 	for _, line := range chLines {
 		sb.WriteString(line + "\n")
@@ -450,15 +515,20 @@ func renderWifi(snap NetworkSnapshot, sigHist, snrHist []float64, width int) str
 
 	// Nearby networks
 	if len(snap.NearbyNets) > 0 {
-		sb.WriteString("\n" + cardHeader("◧", fmt.Sprintf("Nearby (%d)", len(snap.NearbyNets)), cw) + "\n")
-		sb.WriteString(subtleStyle.Render(fmt.Sprintf("%-18s %-14s %-12s %s",
-			"SSID", "CHANNEL", "SECURITY", "SIGNAL")) + "\n")
+		sb.WriteString("\n" + cardHeader(iconDevices, fmt.Sprintf("Nearby Networks (%d)", len(snap.NearbyNets)), cw) + "\n")
+		sb.WriteString(subtleStyle.Render(fmt.Sprintf("%-18s %-8s %-5s %-12s %s",
+			"SSID", "CH", "BAND", "SECURITY", "SIGNAL")) + "\n")
+		sb.WriteString(lineStyle.Render(strings.Repeat("╌", min(cw, 60))) + "\n")
 		for i, n := range snap.NearbyNets {
 			if i >= 12 { break }
 			name := n.SSID
 			if name == "<redacted>" { name = subtleStyle.Render("(hidden)") }
-			sb.WriteString(fmt.Sprintf("%-18s %-14s %-12s %s\n",
-				truncate(name, 18), n.Channel, truncate(n.Security, 12), colorSignal(n.SignalDBm)))
+			// Extract channel number only
+			chNum := strings.Fields(n.Channel)
+			ch := n.Channel
+			if len(chNum) > 0 { ch = chNum[0] }
+			sb.WriteString(fmt.Sprintf("%-18s %-8s %-5s %-12s %s\n",
+				truncate(name, 18), ch, n.Band, truncate(n.Security, 12), colorSignal(n.SignalDBm)))
 		}
 	}
 
@@ -485,7 +555,7 @@ func buildChannelMap(current WifiInfo, nearby []NearbyNetwork) []string {
 	var lines []string
 
 	if len(ch24) > 0 {
-		line := subtleStyle.Render("2.4G ") + " "
+		line := subtleStyle.Render("2.4G  ")
 		for ch := 1; ch <= 13; ch++ {
 			cnt := ch24[ch]
 			label := fmt.Sprintf("%2d", ch)
@@ -499,22 +569,39 @@ func buildChannelMap(current WifiInfo, nearby []NearbyNetwork) []string {
 	}
 
 	if len(ch5) > 0 {
-		line := subtleStyle.Render("5GHz ") + " "
-		channels5 := []int{36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 149, 153, 157, 161, 165}
-		for _, ch := range channels5 {
-			cnt := ch5[ch]
-			label := fmt.Sprintf("%3d", ch)
-			switch {
-			case cnt == 0: line += subtleStyle.Render(label) + " "
-			case cnt == 1: line += okStyle.Render(label) + " "
-			default:       line += warnStyle.Render(label) + " "
-			}
+		// Group by UNII band
+		bands := []struct {
+			name     string
+			channels []int
+		}{
+			{"U1", []int{36, 40, 44, 48}},
+			{"U2", []int{52, 56, 60, 64}},
+			{"U2e", []int{100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140}},
+			{"U3", []int{149, 153, 157, 161, 165}},
 		}
-		lines = append(lines, line)
+		for _, band := range bands {
+			hasAny := false
+			for _, ch := range band.channels {
+				if ch5[ch] > 0 { hasAny = true; break }
+			}
+			if !hasAny { continue }
+
+			line := subtleStyle.Render(fmt.Sprintf("%-5s ", band.name))
+			for _, ch := range band.channels {
+				cnt := ch5[ch]
+				label := fmt.Sprintf("%3d", ch)
+				switch {
+				case cnt == 0: line += subtleStyle.Render(label) + " "
+				case cnt == 1: line += okStyle.Render(label) + " "
+				default:       line += warnStyle.Render(label) + " "
+				}
+			}
+			lines = append(lines, line)
+		}
 	}
 
 	if len(lines) == 0 {
-		lines = append(lines, subtleStyle.Render("No channel data"))
+		lines = append(lines, subtleStyle.Render("No channel data available"))
 	}
 	return lines
 }
