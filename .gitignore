@@ -80,3 +80,7 @@ run_tests.ps1
 AGENTS.md
 mole_guidelines.md
 CLAUDE.md
+
+# Compiled Go binaries (symlinked from Homebrew Cellar)
+bin/status-go
+bin/analyze-go
