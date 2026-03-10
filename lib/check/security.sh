@@ -361,13 +361,19 @@ run_lynis_audit() {
         stop_inline_spinner
     fi
 
+    # Strip ANSI codes from lynis output
+    local lynis_clean
+    lynis_clean=$(echo "$lynis_output" | sed 's/\x1b\[[0-9;]*m//g; s/\x1b\[[0-9;]*[a-zA-Z]//g')
+
     local hardening_index
-    hardening_index=$(echo "$lynis_output" | grep "Hardening index" | awk '{print $NF}' || echo "N/A")
+    hardening_index=$(echo "$lynis_clean" | grep "Hardening index" | grep -oE '[0-9]+' | head -1 || echo "N/A")
     sec_info "Hardening Index: ${hardening_index:-N/A}"
 
     local lynis_warnings
-    lynis_warnings=$(echo "$lynis_output" | grep -c "Warning" || echo "0")
-    if [[ "$lynis_warnings" -gt 0 ]]; then
+    lynis_warnings=$(echo "$lynis_clean" | grep -c "Warning" 2>/dev/null || true)
+    lynis_warnings="${lynis_warnings:-0}"
+    lynis_warnings=$(echo "$lynis_warnings" | tr -d '[:space:]')
+    if [[ "$lynis_warnings" =~ ^[0-9]+$ ]] && [[ "$lynis_warnings" -gt 0 ]]; then
         sec_warn "Lynis found $lynis_warnings warnings"
     else
         sec_pass "Lynis: no warnings"

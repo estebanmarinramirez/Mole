@@ -11,6 +11,7 @@ MOLE_COMMANDS=(
     "login:Manage startup items"
     "defaults:Tune macOS settings"
     "privacy:Clean tracking data"
+    "network:Network diagnostics"
     "purge:Remove old project artifacts"
     "installer:Find and remove installer files"
     "touchid:Configure Touch ID for sudo"

@@ -904,6 +904,9 @@ main() {
         "privacy")
             exec "$SCRIPT_DIR/bin/privacy.sh" "${args[@]:1}"
             ;;
+        "network")
+            exec "$SCRIPT_DIR/bin/network.sh" "${args[@]:1}"
+            ;;
         "purge")
             exec "$SCRIPT_DIR/bin/purge.sh" "${args[@]:1}"
             ;;
