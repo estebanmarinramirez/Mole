@@ -1113,6 +1113,16 @@ main() {
                 manage_whitelist "clean"
                 exit 0
                 ;;
+            "--log" | "-l")
+                source "$SCRIPT_DIR/../lib/core/log_viewer.sh"
+                local log_detail=""
+                # Check if --all follows
+                for next_arg in "$@"; do
+                    [[ "$next_arg" == "--all" || "$next_arg" == "-a" ]] && log_detail="--all"
+                done
+                show_operations_log "clean" "$log_detail"
+                exit 0
+                ;;
         esac
     done
 

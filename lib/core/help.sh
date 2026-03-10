@@ -8,6 +8,8 @@ show_clean_help() {
     echo "Options:"
     echo "  --dry-run, -n     Preview cleanup without making changes"
     echo "  --whitelist       Manage protected paths"
+    echo "  --log, -l         Show last session: what was cleaned and where"
+    echo "  --log --all       Show full path list from last session"
     echo "  --debug           Show detailed operation logs"
     echo "  -h, --help        Show this help message"
 }
@@ -80,6 +82,7 @@ show_help_tree() {
     printf "  %smo clean%s                         Free up disk space\n" "$GREEN" "$NC"
     printf "  %s %s %s--dry-run, -n%s              Preview cleanup\n" "$GRAY" "$T" "$GREEN" "$NC"
     printf "  %s %s %s--whitelist%s                 Manage protected caches\n" "$GRAY" "$T" "$GREEN" "$NC"
+    printf "  %s %s %s--log, -l%s                   Show last session report\n" "$GRAY" "$T" "$GREEN" "$NC"
     printf "  %s %s %s--debug%s                     Verbose logs\n" "$GRAY" "$E" "$GREEN" "$NC"
     echo ""
     printf "  %smo uninstall%s                     Remove apps completely\n" "$GREEN" "$NC"
