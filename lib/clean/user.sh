@@ -427,8 +427,8 @@ clean_support_app_data() {
         safe_find_delete "$idle_assets_dir" "*" "$support_age_days" "f" || true
     fi
 
-    # Clean old aerial wallpaper videos (can be large, safe to remove).
-    safe_clean ~/Library/Application\ Support/com.apple.wallpaper/aerials/videos/* "Aerial wallpaper videos"
+    # Aerial wallpaper videos are now protected by default whitelist.
+    # Users can opt-in to cleaning them via: mo clean --whitelist
 
     # Do not touch Messages attachments, only preview/sticker caches.
     if pgrep -x "Messages" > /dev/null 2>&1; then

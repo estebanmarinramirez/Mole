@@ -802,6 +802,9 @@ EOF
 }
 
 perform_cleanup() {
+    # Source section selector for is_section_selected checks.
+    source "$SCRIPT_DIR/../lib/core/section_selector.sh"
+
     # Test mode skips expensive scans and returns minimal output.
     local test_mode_enabled=false
     if [[ "${MOLE_TEST_MODE:-0}" == "1" ]]; then
@@ -915,7 +918,7 @@ perform_cleanup() {
     set +e
 
     # ===== 1. System =====
-    if [[ "$SYSTEM_CLEAN" == "true" ]]; then
+    if [[ "$SYSTEM_CLEAN" == "true" ]] && is_section_selected "system"; then
         start_section "System"
         clean_deep_system
         clean_local_snapshots
@@ -930,82 +933,112 @@ perform_cleanup() {
     fi
 
     # ===== 2. User essentials =====
+    if is_section_selected "user"; then
     start_section "User essentials"
     clean_user_essentials
     clean_finder_metadata
     scan_external_volumes
     end_section
+    fi
 
     # ===== 3. App caches (merged sandboxed and standard app caches) =====
+    if is_section_selected "app_caches"; then
     start_section "App caches"
     clean_app_caches
     end_section
+    fi
 
     # ===== 4. Browsers =====
+    if is_section_selected "browsers"; then
     start_section "Browsers"
     clean_browsers
     end_section
+    fi
 
     # ===== 5. Cloud & Office =====
+    if is_section_selected "cloud"; then
     start_section "Cloud & Office"
     clean_cloud_storage
     clean_office_applications
     end_section
+    fi
 
     # ===== 6. Developer tools (merged CLI and GUI tooling) =====
+    if is_section_selected "dev"; then
     start_section "Developer tools"
     clean_developer_tools
     end_section
+    fi
 
     # ===== 7. Applications =====
+    if is_section_selected "apps"; then
     start_section "Applications"
     clean_user_gui_applications
     end_section
+    fi
 
     # ===== 8. Virtualization =====
+    if is_section_selected "virt"; then
     start_section "Virtualization"
     clean_virtualization_tools
     end_section
+    fi
 
     # ===== 9. Application Support =====
+    if is_section_selected "support"; then
     start_section "Application Support"
     clean_application_support_logs
     end_section
+    fi
 
     # ===== 10. Orphaned data =====
+    if is_section_selected "orphans"; then
     start_section "Orphaned data"
     clean_orphaned_app_data
     clean_orphaned_system_services
     clean_orphaned_launch_agents
     end_section
+    fi
 
     # ===== 11. Apple Silicon =====
+    if is_section_selected "silicon"; then
     clean_apple_silicon_caches
+    fi
 
     # ===== 12. Device backups =====
+    if is_section_selected "backups"; then
     start_section "Device backups"
     check_ios_device_backups
     end_section
+    fi
 
     # ===== 13. Time Machine =====
+    if is_section_selected "timemachine"; then
     start_section "Time Machine"
     clean_time_machine_failed_backups
     end_section
+    fi
 
     # ===== 14. Large files =====
+    if is_section_selected "large"; then
     start_section "Large files"
     check_large_file_candidates
     end_section
+    fi
 
     # ===== 15. System Data clues =====
+    if is_section_selected "sysdata"; then
     start_section "System Data clues"
     show_system_data_hint_notice
     end_section
+    fi
 
     # ===== 16. Project artifacts =====
+    if is_section_selected "projects"; then
     start_section "Project artifacts"
     show_project_artifact_hint_notice
     end_section
+    fi
 
     # ===== Final summary =====
     echo ""
@@ -1113,6 +1146,9 @@ main() {
                 manage_whitelist "clean"
                 exit 0
                 ;;
+            "--select" | "-s")
+                export MOLE_SELECT_MODE=1
+                ;;
             "--log" | "-l")
                 source "$SCRIPT_DIR/../lib/core/log_viewer.sh"
                 local log_detail=""
@@ -1125,6 +1161,15 @@ main() {
                 ;;
         esac
     done
+
+    # If --select mode, show section picker first.
+    if [[ "${MOLE_SELECT_MODE:-}" == "1" ]]; then
+        source "$SCRIPT_DIR/../lib/core/section_selector.sh"
+        if ! select_clean_sections; then
+            echo -e "${GRAY}Cancelled.${NC}"
+            exit 0
+        fi
+    fi
 
     start_cleanup
     hide_cursor

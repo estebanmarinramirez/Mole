@@ -99,6 +99,8 @@ declare -a DEFAULT_WHITELIST_PATTERNS=(
     "$HOME/Library/Application Support/JetBrains*"
     "$HOME/Library/Caches/com.apple.finder"
     "$HOME/Library/Mobile Documents*"
+    # Aerial wallpaper videos (large, user-visible, re-download is slow)
+    "$HOME/Library/Application Support/com.apple.wallpaper/aerials/videos*"
     # System-critical caches that affect macOS functionality and stability
     # CRITICAL: Removing these will cause system search and UI issues
     "$HOME/Library/Caches/com.apple.FontRegistry*"
